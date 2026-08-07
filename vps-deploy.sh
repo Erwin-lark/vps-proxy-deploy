@@ -3,10 +3,10 @@
 #  VPS 一键部署脚本 — 三协议代理 + 流量监控 + 订阅生成
 #
 #  ██ 交互式安装:                                 ██
-#  curl -sLo vps-deploy.sh https://tinyurl.com/jp-bvl-deploy && sudo bash vps-deploy.sh
+#  curl -sLo vps-deploy.sh https://tinyurl.com/vps-proxy-deploy && sudo bash vps-deploy.sh
 #
 #  ██ 一键安装（跳过交互，直接传参）:                ██
-#  curl -sLo vps-deploy.sh https://tinyurl.com/jp-bvl-deploy && sudo bash vps-deploy.sh us-gcp.alecyinshis.com GCP
+#  curl -sLo vps-deploy.sh https://tinyurl.com/vps-proxy-deploy && sudo bash vps-deploy.sh us-gcp.alecyinshis.com GCP
 #
 #  ██ 断点续传：中断后重新运行，已安装的服务自动跳过 ██
 #
@@ -55,6 +55,66 @@ setup_config() {
     echo ""
     info "域名:     ${DOMAIN}"
     info "服务商:   ${PROVIDER}"
+
+    # ═══════════════════════════════════════════════════
+    # 前置检查：确认 Cloudflare 准备工作已完成
+    # ═══════════════════════════════════════════════════
+    echo ""
+    echo -e "${YELLOW}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo -e "${YELLOW}  运行脚本前，请确认以下 Cloudflare 操作已完成：${NC}"
+    echo -e "${YELLOW}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo ""
+    echo -e "  ${CYAN}①${NC} DNS A 记录已添加："
+    echo -e "     ${GREEN}${DOMAIN}${NC} → VPS IP → ${YELLOW}灰云 (DNS only)${NC}"
+    echo ""
+    echo -e "  ${CYAN}②${NC} Cloudflare Tunnel 已创建并复制了 Token"
+    echo -e "     (eyJ 开头的长字符串)"
+    echo ""
+    echo -e "  ${CYAN}③${NC} Tunnel Public Hostname 已手动配置："
+    echo -e "     cdn-xxx.alecyinshis.com → HTTP → ${RED}localhost:10001${NC}"
+    echo ""
+    echo -e "${RED}  ⚠️ 第③步不完成，CDN 节点永远不通！${NC}"
+    echo ""
+
+    # 非交互模式跳过确认
+    if [ -n "$1" ] && [ -n "$2" ]; then
+        info "非交互模式，跳过后跳过前置确认"
+    else
+        while true; do
+            echo -e "${GREEN}以上 3 项是否已完成? [y/N]:${NC}"
+            read -p "  > " CF_READY
+            case "$CF_READY" in
+                y|Y|yes|YES)
+                    info "已确认，继续部署"
+                    break
+                    ;;
+                n|N|no|NO|"")
+                    echo ""
+                    echo -e "${RED}请先完成上述 3 项操作后再运行脚本：${NC}"
+                    echo ""
+                    echo "  ① 打开 https://dash.cloudflare.com/"
+                    echo "     添加 DNS A 记录: ${DOMAIN} → <VPS_IP> 灰云"
+                    echo ""
+                    echo "  ② 打开 https://one.dash.cloudflare.com/"
+                    echo "     Networks → Tunnels → Create a tunnel"
+                    echo "     复制 Token (eyJ...)"
+                    echo ""
+                    echo "  ③ Tunnel → Configure → Public Hostname"
+                    echo "     Subdomain: cdn-xxx / URL: localhost:10001"
+                    echo ""
+                    echo -e "${GREEN}完成后输入 y 继续，输入 q 退出${NC}"
+                    read -p "  > " RETRY
+                    if [ "$RETRY" = "q" ] || [ "$RETRY" = "Q" ]; then
+                        echo "已退出"
+                        exit 0
+                    fi
+                    ;;
+                *)
+                    echo "请输入 y 或 n"
+                    ;;
+            esac
+        done
+    fi
 
     # SSH 端口
     SSH_OLD_PORT=$(grep -oP '^Port\s+\K\d+' /etc/ssh/sshd_config 2>/dev/null || echo "22")
