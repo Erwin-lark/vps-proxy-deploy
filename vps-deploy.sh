@@ -58,7 +58,9 @@ setup_config() {
 
     # 其余固定配置
     EMAIL="alecyinshi@gmail.com"
-    SSH_PORT=23277
+    # SSH 端口：保持当前端口不变，不强制修改
+    SSH_PORT=$(grep -oP '^Port\s+\K\d+' /etc/ssh/sshd_config 2>/dev/null || echo "22")
+    [ -z "$SSH_PORT" ] && SSH_PORT=22
     REALITY_PORT=443
     HY2_PORT=443
     CADDY_PORT=8443
@@ -272,9 +274,19 @@ generate_keys() {
 install_xray() {
     step "安装 Xray"
 
-    # 安装
+    # 安装（官方脚本 + 直链兜底）
     bash -c "$(curl -sL https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install \
-        --version latest > /dev/null 2>&1
+        --version latest > /dev/null 2>&1 || {
+        warn "官方脚本安装失败，尝试直接下载..."
+        ARCH=$(uname -m)
+        [ "$ARCH" = "x86_64" ] && ARCH="64"
+        [ "$ARCH" = "aarch64" ] && ARCH="arm64-v8a"
+        curl -sLo /tmp/xray.zip "https://github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-${ARCH}.zip"
+        unzip -o /tmp/xray.zip -d /usr/local/bin/ xray 2>/dev/null || true
+        chmod +x /usr/local/bin/xray 2>/dev/null
+        mkdir -p /usr/local/etc/xray
+        rm -f /tmp/xray.zip
+    }
 
     # Reality 密钥
     REALITY_KEYPAIR=$(/usr/local/bin/xray x25519 2>/dev/null)
@@ -288,6 +300,23 @@ install_xray() {
         [ -n "$CLIENT_JSON" ] && CLIENT_JSON+=","
         CLIENT_JSON+="{\"id\":\"${VL_UUIDS[$i]}\",\"flow\":\"xtls-rprx-vision\",\"email\":\"${CLIENT_NAMES[$i]}\"}"
     done
+
+    # 若官方脚本未创建 systemd，手动创建
+    if [ ! -f /etc/systemd/system/xray.service ]; then
+        cat > /etc/systemd/system/xray.service << SVCEOF
+[Unit]
+Description=Xray Service
+After=network.target
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/xray run -config /usr/local/etc/xray/config.json
+Restart=on-failure
+RestartSec=5s
+[Install]
+WantedBy=multi-user.target
+SVCEOF
+        systemctl daemon-reload
+    fi
 
     # 写入配置
     mkdir -p /usr/local/etc/xray
@@ -748,6 +777,14 @@ install_cloudflared() {
         return 0
     fi
 
+    # 自动提取 eyJ 开头的 Token（忽略前面的无效内容）
+    CF_TOKEN=$(echo "$CF_TOKEN" | grep -oP 'eyJ[A-Za-z0-9_\-]+\.[A-Za-z0-9_\-]+\.[A-Za-z0-9_\-]+' | head -1)
+    if [ -z "$CF_TOKEN" ]; then
+        warn "未识别到有效 Token（应以 eyJ 开头），已跳过"
+        return 0
+    fi
+    info "已识别 Token: ${CF_TOKEN:0:20}..."
+
     # 注册服务
     cloudflared service install "$CF_TOKEN" > /dev/null 2>&1
 
@@ -784,13 +821,14 @@ EOF
 #  ██████ SSH 配置 ██████
 #==============================================================================
 setup_ssh() {
-    step "SSH 配置"
+    # 不使用 step()，避免计数器溢出
+    echo -e "\n${CYAN}==== SSH 配置 ====${NC}"
 
     local CUR_PORT
     CUR_PORT=$(grep -oP '^Port\s+\K\d+' /etc/ssh/sshd_config 2>/dev/null || echo "22")
 
     if [ "$CUR_PORT" = "$SSH_PORT" ]; then
-        info "SSH 端口已是 ${SSH_PORT}，跳过修改"
+        info "SSH 端口已是 ${SSH_PORT}，未修改"
         return 0
     fi
 
@@ -805,10 +843,14 @@ setup_ssh() {
     fi
 
     SSH_CHANGED=1
-    info "SSH 端口已修改为 ${SSH_PORT}（原端口 ${CUR_PORT} 仍生效）"
-    warn "═══ 请在另一个终端用新端口 ${SSH_PORT} 测试连接 ═══"
-    warn "连接成功后再运行: systemctl restart sshd"
-    warn "旧端口 ${CUR_PORT} 的会话请勿关闭，直到确认新端口可用！"
+    echo -e "${RED}╔══════════════════════════════════════════════════════════╗${NC}"
+    echo -e "${RED}║  ⚠️  SSH 端口已修改: ${CUR_PORT} → ${SSH_PORT}                          ║${NC}"
+    echo -e "${RED}║                                                        ║${NC}"
+    echo -e "${RED}║  当前连接仍在使用旧端口 ${CUR_PORT}，不要关闭本窗口！       ║${NC}"
+    echo -e "${RED}║  请立即打开新终端，测试新端口是否能连接：               ║${NC}"
+    echo -e "${RED}║  ssh $(whoami)@$(curl -s4 ifconfig.me 2>/dev/null || echo 'IP') -p ${SSH_PORT}                     ║${NC}"
+    echo -e "${RED}║  确认成功后执行: sudo systemctl restart sshd           ║${NC}"
+    echo -e "${RED}╚══════════════════════════════════════════════════════════╝${NC}"
 }
 
 #==============================================================================
@@ -936,7 +978,6 @@ main() {
     fi
 
     # ── 检查 ──
-    TOTAL=14  # 重置避免 SSH 步骤超出
     step "服务状态检查"
     for svc in xray hysteria-server caddy cloudflared fail2ban vnstat; do
         if systemctl is-active --quiet $svc 2>/dev/null; then
