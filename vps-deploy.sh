@@ -2,8 +2,8 @@
 #==============================================================================
 #  VPS 一键部署脚本 — 三协议代理 + 流量监控 + 订阅生成
 #
-#  ██ 一键安装（粘贴到新 VPS 终端）██
-#  bash <(curl -sL https://jp.bvl.dc3.alecyinshis.com:8443/vps-deploy.sh)
+#  ██ 一键安装（粘贴到新 VPS 终端，完全独立，不依赖本台 VPS）██
+#  bash <(curl -sL https://raw.githubusercontent.com/Erwin-lark/jp-bvl/main/vps-deploy.sh)
 #
 #  支持: Ubuntu 20.04/22.04/24.04, Debian 11/12
 #  需要: root 权限, 至少 1GB 内存
