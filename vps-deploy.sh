@@ -710,45 +710,51 @@ install_cloudflared() {
         return 0
     fi
 
+    # 先安装 cloudflared
+    info "正在安装 cloudflared..."
+    curl -sLo /tmp/cloudflared.deb https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb
+    dpkg -i /tmp/cloudflared.deb > /dev/null 2>&1 || true
+    rm -f /tmp/cloudflared.deb
+
+    if [ ! -x /usr/bin/cloudflared ] && [ ! -x /usr/local/bin/cloudflared ]; then
+        warn "cloudflared 安装失败，跳过"
+        return 0
+    fi
+    info "cloudflared 已安装"
+
     echo ""
-    echo -e "${GREEN}请按以下步骤操作：${NC}"
+    echo -e "${GREEN}请按以下步骤获取 Token：${NC}"
     echo ""
     echo "  1️⃣  打开 https://one.dash.cloudflare.com/"
-    echo "  2️⃣  进入 Networks → Tunnels → Create a tunnel"
+    echo "  2️⃣  Networks → Tunnels → Create a tunnel"
     echo "  3️⃣  Tunnel 名称建议: cdn-us-gcp-dc3"
-    echo "  4️⃣  选择 Docker / Debian 环境，复制安装命令（包含 Token）"
-    echo "  5️⃣  粘贴到下面的提示符（以 sudo cloudflared service install 开头）"
+    echo "  4️⃣  选择 Debian 环境，页面会显示类似命令："
+    echo "     sudo cloudflared service install eyJh...长字符串..."
+    echo "  5️⃣  只复制那个 eyJ 开头的长 Token，粘贴到下面"
     echo ""
-    echo "  然后进入 Tunnel → Configure → Public Hostname："
+    echo "  创建后进入 Tunnel → Configure → Public Hostname："
     echo "    Subdomain: cdn-us-gcp-dc3"
     echo "    Domain:    alecyinshis.com"
     echo "    Type:      HTTP"
     echo "    URL:       localhost:10001"
     echo ""
     echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-    echo -e "${CYAN}  请粘贴 Cloudflare Tunnel 安装命令：${NC}"
-    echo -e "${CYAN}  (如: sudo cloudflared service install eyJh... )${NC}"
+    echo -e "${CYAN}  请粘贴 Token（eyJ 开头的那一串）：${NC}"
     echo -e "${CYAN}  输入 n 跳过${NC}"
-    read -p "  > " CF_CMD
+    read -p "  > " CF_TOKEN
 
-    if [ "$CF_CMD" = "n" ] || [ "$CF_CMD" = "N" ] || [ -z "$CF_CMD" ]; then
+    if [ "$CF_TOKEN" = "n" ] || [ "$CF_TOKEN" = "N" ] || [ -z "$CF_TOKEN" ]; then
         warn "已跳过 Cloudflare Tunnel（VMess CDN 节点将不可用）"
-        warn "稍后可手动安装: https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/"
         return 0
     fi
 
-    # 执行安装命令
-    eval "$CF_CMD" 2>&1 || {
-        warn "cloudflared 安装命令执行失败，尝试手动下载..."
-        curl -sLo /tmp/cloudflared.deb https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb
-        dpkg -i /tmp/cloudflared.deb 2>/dev/null || true
-        cloudflared service install "$CF_CMD" 2>/dev/null || true
-    }
+    # 注册服务
+    cloudflared service install "$CF_TOKEN" > /dev/null 2>&1
 
     if systemctl is-active --quiet cloudflared 2>/dev/null; then
         info "Cloudflare Tunnel 已启动 ✅"
     else
-        warn "Cloudflare Tunnel 未启动，请检查: systemctl status cloudflared"
+        warn "Tunnel 未启动，检查 Token 是否正确: systemctl status cloudflared"
     fi
 }
 
