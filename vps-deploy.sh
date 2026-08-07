@@ -793,6 +793,29 @@ install_cloudflared() {
     else
         warn "Tunnel 未启动，检查 Token 是否正确: systemctl status cloudflared"
     fi
+
+    # ⚠️ 强提醒：手动配置 Public Hostname
+    echo ""
+    echo -e "${RED}╔══════════════════════════════════════════════════════════════╗${NC}"
+    echo -e "${RED}║  ⚠️  还没完！请立即完成以下手动操作：                       ║${NC}"
+    echo -e "${RED}╠══════════════════════════════════════════════════════════════╣${NC}"
+    echo -e "${RED}║                                                            ║${NC}"
+    echo -e "${RED}║  回到 Cloudflare 控制台:                                   ║${NC}"
+    echo -e "${RED}║  https://one.dash.cloudflare.com/                          ║${NC}"
+    echo -e "${RED}║                                                            ║${NC}"
+    echo -e "${RED}║  Networks → Tunnels → 点击刚创建的隧道 → Configure         ║${NC}"
+    echo -e "${RED}║  → Public Hostname → Add a public hostname                 ║${NC}"
+    echo -e "${RED}║                                                            ║${NC}"
+    echo -e "${RED}║  填写以下内容：                                            ║${NC}"
+    echo -e "${RED}║    Subdomain:   cdn-us-gcp-dc3                             ║${NC}"
+    echo -e "${RED}║    Domain:      alecyinshis.com                            ║${NC}"
+    echo -e "${RED}║    Type:        HTTP                                       ║${NC}"
+    echo -e "${RED}║    URL:         localhost:10001                            ║${NC}"
+    echo -e "${RED}║                                                            ║${NC}"
+    echo -e "${RED}║  ⚠️  不完成这一步，CDN 节点永远不会通！                    ║${NC}"
+    echo -e "${RED}╚══════════════════════════════════════════════════════════════╝${NC}"
+    echo ""
+    read -p "  已完成上述手动配置? [按回车继续] " _DUMMY
 }
 
 #==============================================================================
