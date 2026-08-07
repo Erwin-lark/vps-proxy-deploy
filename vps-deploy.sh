@@ -290,6 +290,7 @@ install_xray() {
     done
 
     # 写入配置
+    mkdir -p /usr/local/etc/xray
     cat > /usr/local/etc/xray/config.json << XEOF
 {
   "log": {"loglevel": "warning"},
@@ -439,9 +440,8 @@ install_caddy() {
     apt-get update -qq
     apt-get install -y -qq caddy > /dev/null 2>&1
 
-    # 目录（SUB_TOKEN 在脚本顶端已定义）
+    # 目录
     mkdir -p /var/lib/subscription/${SUB_TOKEN} /var/lib/traffic-monitor /etc/vps-proxy
-    echo "${SUB_TOKEN}" > /etc/vps-proxy/sub-token
 
     # Caddyfile（文件服务器根目录指向 subscription）
     cat > /etc/caddy/Caddyfile << CEOF
@@ -687,6 +687,72 @@ GEOF
 }
 
 #==============================================================================
+#  ██████ Cloudflare Tunnel (cloudflared) ██████
+#==============================================================================
+install_cloudflared() {
+    step "Cloudflare Tunnel"
+
+    if [ -x /usr/bin/cloudflared ] || [ -x /usr/local/bin/cloudflared ]; then
+        info "cloudflared 已安装，跳过"
+        return 0
+    fi
+
+    echo ""
+    echo -e "${YELLOW}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo -e "${YELLOW}  Cloudflare Tunnel 用于 VMess CDN 兜底节点${NC}"
+    echo -e "${YELLOW}  如果不需要 CDN 节点，输入 n 跳过${NC}"
+    echo -e "${YELLOW}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo ""
+    read -p "  是否安装 Cloudflare Tunnel? [Y/n]: " INSTALL_CF
+
+    if [ "$INSTALL_CF" = "n" ] || [ "$INSTALL_CF" = "N" ]; then
+        info "已跳过 Cloudflare Tunnel（VMess CDN 节点将不可用）"
+        return 0
+    fi
+
+    echo ""
+    echo -e "${GREEN}请按以下步骤操作：${NC}"
+    echo ""
+    echo "  1️⃣  打开 https://one.dash.cloudflare.com/"
+    echo "  2️⃣  进入 Networks → Tunnels → Create a tunnel"
+    echo "  3️⃣  Tunnel 名称建议: cdn-us-gcp-dc3"
+    echo "  4️⃣  选择 Docker / Debian 环境，复制安装命令（包含 Token）"
+    echo "  5️⃣  粘贴到下面的提示符（以 sudo cloudflared service install 开头）"
+    echo ""
+    echo "  然后进入 Tunnel → Configure → Public Hostname："
+    echo "    Subdomain: cdn-us-gcp-dc3"
+    echo "    Domain:    alecyinshis.com"
+    echo "    Type:      HTTP"
+    echo "    URL:       localhost:10001"
+    echo ""
+    echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo -e "${CYAN}  请粘贴 Cloudflare Tunnel 安装命令：${NC}"
+    echo -e "${CYAN}  (如: sudo cloudflared service install eyJh... )${NC}"
+    echo -e "${CYAN}  输入 n 跳过${NC}"
+    read -p "  > " CF_CMD
+
+    if [ "$CF_CMD" = "n" ] || [ "$CF_CMD" = "N" ] || [ -z "$CF_CMD" ]; then
+        warn "已跳过 Cloudflare Tunnel（VMess CDN 节点将不可用）"
+        warn "稍后可手动安装: https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/"
+        return 0
+    fi
+
+    # 执行安装命令
+    eval "$CF_CMD" 2>&1 || {
+        warn "cloudflared 安装命令执行失败，尝试手动下载..."
+        curl -sLo /tmp/cloudflared.deb https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb
+        dpkg -i /tmp/cloudflared.deb 2>/dev/null || true
+        cloudflared service install "$CF_CMD" 2>/dev/null || true
+    }
+
+    if systemctl is-active --quiet cloudflared 2>/dev/null; then
+        info "Cloudflare Tunnel 已启动 ✅"
+    else
+        warn "Cloudflare Tunnel 未启动，请检查: systemctl status cloudflared"
+    fi
+}
+
+#==============================================================================
 #  ██████ fail2ban ██████
 #==============================================================================
 install_fail2ban() {
@@ -782,16 +848,20 @@ print_summary() {
 #  ██████ 主流程 ██████
 #==============================================================================
 main() {
-    TOTAL=13; STEP=0; SSH_CHANGED=0
+    TOTAL=14; STEP=0; SSH_CHANGED=0
 
     # ── 1. 配置 ──
     setup_config "$@"
+
+    # SUB_TOKEN 持久化（不依赖 Caddy）
+    mkdir -p /etc/vps-proxy
+    echo "${SUB_TOKEN}" > /etc/vps-proxy/sub-token
 
     # ── 2. 检测 ──
     check_system
     auto_detect_region
 
-    # ── 3. 系统优化（幂等，可重复执行）──
+    # ── 3. 系统优化 ──
     optimize_system
 
     # ── 4. 依赖 ──
@@ -801,7 +871,9 @@ main() {
     if [ -f /etc/vps-proxy/subs.conf ]; then
         step "密钥生成"
         source /etc/vps-proxy/subs.conf
-        info "检测到已有配置，复用密钥 (UUID: ${VL_UUID:0:8}...)"
+        info "检测到已有配置，复用密钥 (VL: ${VL_UUID:0:8}...)"
+        # 确保新域名写入 config
+        SERVER="${DOMAIN}"
     else
         generate_keys
     fi
@@ -829,11 +901,16 @@ main() {
     if [ -x /usr/bin/caddy ]; then
         step "安装 Caddy"
         info "Caddy 已安装，跳过"
+        # 确保订阅目录存在
+        mkdir -p /var/lib/subscription/${SUB_TOKEN} /var/lib/traffic-monitor
     else
         install_caddy
     fi
 
-    # ── 10. 流量监控 ──
+    # ── 10. Cloudflare Tunnel ──
+    install_cloudflared
+
+    # ── 11. 流量监控 ──
     if [ -x /usr/bin/vnstat ]; then
         step "流量监控"
         info "vnstat 已安装，跳过"
@@ -841,10 +918,10 @@ main() {
         install_vnstat
     fi
 
-    # ── 11. 订阅生成器 ──
+    # ── 12. 订阅生成器 ──
     install_sub_generator
 
-    # ── 12. fail2ban ──
+    # ── 13. fail2ban ──
     if systemctl is-active --quiet fail2ban 2>/dev/null; then
         step "fail2ban"
         info "fail2ban 已运行，跳过"
@@ -853,8 +930,9 @@ main() {
     fi
 
     # ── 检查 ──
+    TOTAL=14  # 重置避免 SSH 步骤超出
     step "服务状态检查"
-    for svc in xray hysteria-server caddy fail2ban vnstat; do
+    for svc in xray hysteria-server caddy cloudflared fail2ban vnstat; do
         if systemctl is-active --quiet $svc 2>/dev/null; then
             info "$svc ✅"
         else
@@ -865,7 +943,7 @@ main() {
     # ── 摘要 ──
     print_summary
 
-    # ── 13. SSH 端口（放到最后，不重启，用户手动操作）──
+    # ── 14. SSH 端口（放到最后，不重启，用户手动操作）──
     setup_ssh
 
     if [ "$SSH_CHANGED" = 1 ]; then
