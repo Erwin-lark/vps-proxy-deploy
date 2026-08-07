@@ -2,13 +2,18 @@
 #==============================================================================
 #  VPS 一键部署脚本 — 三协议代理 + 流量监控 + 订阅生成
 #
-#  ██ 一键安装（粘贴到新 VPS 终端，完全独立，不依赖本台 VPS）██
-#  bash <(curl -sL https://raw.githubusercontent.com/Erwin-lark/jp-bvl/main/vps-deploy.sh)
+#  ██ 交互式安装:                                 ██
+#  curl -sLo vps-deploy.sh https://tinyurl.com/jp-bvl-deploy && sudo bash vps-deploy.sh
+#
+#  ██ 一键安装（跳过交互，直接传参）:                ██
+#  curl -sLo vps-deploy.sh https://tinyurl.com/jp-bvl-deploy && sudo bash vps-deploy.sh us-gcp.alecyinshis.com GCP
+#
+#  ██ 断点续传：中断后重新运行，已安装的服务自动跳过 ██
 #
 #  支持: Ubuntu 20.04/22.04/24.04, Debian 11/12
 #  需要: root 权限, 至少 1GB 内存
 #==============================================================================
-set -e
+# set -e 已移除：非致命错误不中断部署，用 || true 和 || warn 处理
 
 #==============================================================================
 #  ██████  交互式配置 ██████
@@ -136,7 +141,7 @@ BLUE='\033[0;34m'; CYAN='\033[0;36m'; NC='\033[0m'
 info()  { echo -e "${GREEN}[INFO]${NC}  $*"; }
 warn()  { echo -e "${YELLOW}[WARN]${NC}  $*"; }
 err()   { echo -e "${RED}[ERR]${NC}   $*"; }
-step()  { echo -e "\n${CYAN}==== $* ====${NC}"; }
+step()  { STEP=$((STEP + 1)); echo -e "\n${CYAN}==== [$STEP/$TOTAL] $* ====${NC}"; }
 
 #==============================================================================
 #  ██████ 系统检测 ██████
@@ -709,6 +714,14 @@ EOF
 setup_ssh() {
     step "SSH 配置"
 
+    local CUR_PORT
+    CUR_PORT=$(grep -oP '^Port\s+\K\d+' /etc/ssh/sshd_config 2>/dev/null || echo "22")
+
+    if [ "$CUR_PORT" = "$SSH_PORT" ]; then
+        info "SSH 端口已是 ${SSH_PORT}，跳过修改"
+        return 0
+    fi
+
     # 备份
     cp /etc/ssh/sshd_config /etc/ssh/sshd_config.bak.$(date +%Y%m%d) 2>/dev/null || true
 
@@ -719,9 +732,11 @@ setup_ssh() {
         echo "Port ${SSH_PORT}" >> /etc/ssh/sshd_config
     fi
 
-    systemctl restart sshd 2>/dev/null || systemctl restart ssh 2>/dev/null || true
-    info "SSH 端口已改为 ${SSH_PORT}"
-    warn "请确保新端口在防火墙中已放行，测试新端口连接后再关闭旧 SSH 会话！"
+    SSH_CHANGED=1
+    info "SSH 端口已修改为 ${SSH_PORT}（原端口 ${CUR_PORT} 仍生效）"
+    warn "═══ 请在另一个终端用新端口 ${SSH_PORT} 测试连接 ═══"
+    warn "连接成功后再运行: systemctl restart sshd"
+    warn "旧端口 ${CUR_PORT} 的会话请勿关闭，直到确认新端口可用！"
 }
 
 #==============================================================================
@@ -767,31 +782,100 @@ print_summary() {
 #  ██████ 主流程 ██████
 #==============================================================================
 main() {
+    TOTAL=13; STEP=0; SSH_CHANGED=0
+
+    # ── 1. 配置 ──
     setup_config "$@"
+
+    # ── 2. 检测 ──
     check_system
     auto_detect_region
-    optimize_system
-    install_deps
-    generate_keys
-    setup_firewall
-    setup_ssh
-    install_xray
-    install_hysteria
-    install_caddy
-    install_vnstat
-    install_sub_generator
-    install_fail2ban
 
-    step "最终检查"
+    # ── 3. 系统优化（幂等，可重复执行）──
+    optimize_system
+
+    # ── 4. 依赖 ──
+    install_deps
+
+    # ── 5. 密钥（已存在则复用）──
+    if [ -f /etc/vps-proxy/subs.conf ]; then
+        step "密钥生成"
+        source /etc/vps-proxy/subs.conf
+        info "检测到已有配置，复用密钥 (UUID: ${VL_UUID:0:8}...)"
+    else
+        generate_keys
+    fi
+
+    # ── 6. 防火墙 ──
+    setup_firewall
+
+    # ── 7. Xray ──
+    if [ -x /usr/local/bin/xray ]; then
+        step "安装 Xray"
+        info "Xray 已安装，跳过"
+    else
+        install_xray
+    fi
+
+    # ── 8. Hysteria2 ──
+    if [ -x /usr/local/bin/hysteria ]; then
+        step "安装 Hysteria2"
+        info "Hysteria2 已安装，跳过"
+    else
+        install_hysteria
+    fi
+
+    # ── 9. Caddy ──
+    if [ -x /usr/bin/caddy ]; then
+        step "安装 Caddy"
+        info "Caddy 已安装，跳过"
+    else
+        install_caddy
+    fi
+
+    # ── 10. 流量监控 ──
+    if [ -x /usr/bin/vnstat ]; then
+        step "流量监控"
+        info "vnstat 已安装，跳过"
+    else
+        install_vnstat
+    fi
+
+    # ── 11. 订阅生成器 ──
+    install_sub_generator
+
+    # ── 12. fail2ban ──
+    if systemctl is-active --quiet fail2ban 2>/dev/null; then
+        step "fail2ban"
+        info "fail2ban 已运行，跳过"
+    else
+        install_fail2ban
+    fi
+
+    # ── 检查 ──
+    step "服务状态检查"
     for svc in xray hysteria-server caddy fail2ban vnstat; do
         if systemctl is-active --quiet $svc 2>/dev/null; then
             info "$svc ✅"
         else
-            warn "$svc ❌"
+            warn "$svc ❌ (检查: journalctl -u $svc --no-pager -n 20)"
         fi
     done
 
+    # ── 摘要 ──
     print_summary
+
+    # ── 13. SSH 端口（放到最后，不重启，用户手动操作）──
+    setup_ssh
+
+    if [ "$SSH_CHANGED" = 1 ]; then
+        echo -e "${YELLOW}═══ 部署完成！SSH 端口修改待确认 ═══════════════════${NC}"
+        echo -e "${YELLOW}请打开新终端，用以下命令测试连接：${NC}"
+        echo -e "  ${CYAN}ssh $(whoami)@$(curl -s4 ifconfig.me 2>/dev/null || echo 'IP') -p ${SSH_PORT}${NC}"
+        echo -e "${YELLOW}确认新端口可用后，执行：${NC}"
+        echo -e "  ${CYAN}sudo systemctl restart sshd${NC}"
+        echo ""
+    fi
 }
 
 # 运行
