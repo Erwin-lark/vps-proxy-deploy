@@ -56,11 +56,35 @@ setup_config() {
     info "域名:     ${DOMAIN}"
     info "服务商:   ${PROVIDER}"
 
+    # SSH 端口
+    SSH_OLD_PORT=$(grep -oP '^Port\s+\K\d+' /etc/ssh/sshd_config 2>/dev/null || echo "22")
+    [ -z "$SSH_OLD_PORT" ] && SSH_OLD_PORT=22
+
+    # 非交互模式不询问，保持当前端口
+    if [ -n "$1" ] && [ -n "$2" ]; then
+        SSH_PORT="$SSH_OLD_PORT"
+        info "SSH 端口: ${SSH_PORT} (保持当前)"
+    else
+        echo ""
+        if [ "$SSH_OLD_PORT" = "22" ]; then
+            echo -e "${YELLOW}当前 SSH 端口: 22（默认端口，容易被暴力扫描）${NC}"
+            echo -e "${GREEN}建议修改为随机高端口以提高安全性，是否修改? [y/N]:${NC}"
+            read -p "  > " CHANGE_SSH
+            if [ "$CHANGE_SSH" = "y" ] || [ "$CHANGE_SSH" = "Y" ]; then
+                SSH_PORT=23277
+                info "SSH 将在部署最后阶段修改为 ${SSH_PORT}"
+            else
+                SSH_PORT=22
+                info "SSH 端口保持 22"
+            fi
+        else
+            SSH_PORT="$SSH_OLD_PORT"
+            info "SSH 端口: ${SSH_PORT} (保持当前)"
+        fi
+    fi
+
     # 其余固定配置
     EMAIL="alecyinshi@gmail.com"
-    # SSH 端口：保持当前端口不变，不强制修改
-    SSH_PORT=$(grep -oP '^Port\s+\K\d+' /etc/ssh/sshd_config 2>/dev/null || echo "22")
-    [ -z "$SSH_PORT" ] && SSH_PORT=22
     REALITY_PORT=443
     HY2_PORT=443
     CADDY_PORT=8443
@@ -844,36 +868,38 @@ EOF
 #  ██████ SSH 配置 ██████
 #==============================================================================
 setup_ssh() {
-    # 不使用 step()，避免计数器溢出
-    echo -e "\n${CYAN}==== SSH 配置 ====${NC}"
-
-    local CUR_PORT
-    CUR_PORT=$(grep -oP '^Port\s+\K\d+' /etc/ssh/sshd_config 2>/dev/null || echo "22")
-
-    if [ "$CUR_PORT" = "$SSH_PORT" ]; then
-        info "SSH 端口已是 ${SSH_PORT}，未修改"
+    # 只有用户选择了修改端口才执行
+    if [ "$SSH_PORT" = "$SSH_OLD_PORT" ]; then
+        echo -e "\n${CYAN}==== SSH 端口 ====${NC}"
+        info "SSH 端口保持 ${SSH_PORT}，未修改"
         return 0
     fi
 
-    # 备份
-    cp /etc/ssh/sshd_config /etc/ssh/sshd_config.bak.$(date +%Y%m%d) 2>/dev/null || true
+    echo ""
+    echo -e "${RED}╔══════════════════════════════════════════════════════════════╗${NC}"
+    echo -e "${RED}║                                                            ║${NC}"
+    echo -e "${RED}║  ⚠️⚠️⚠️  SSH 端口即将修改: ${SSH_OLD_PORT} → ${SSH_PORT}  ⚠️⚠️⚠️                ║${NC}"
+    echo -e "${RED}║                                                            ║${NC}"
+    echo -e "${RED}║  当前会话使用端口 ${SSH_OLD_PORT}，修改后请勿关闭本窗口！              ║${NC}"
+    echo -e "${RED}║  立即打开新终端窗口测试新端口连接：                        ║${NC}"
+    echo -e "${RED}║                                                            ║${NC}"
+    echo -e "${RED}║  ssh $(whoami)@$(curl -s4 ifconfig.me 2>/dev/null || echo 'YOUR_IP') -p ${SSH_PORT}                         ║${NC}"
+    echo -e "${RED}║                                                            ║${NC}"
+    echo -e "${RED}║  确认新端口可连接后，在本窗口执行:                         ║${NC}"
+    echo -e "${RED}║  sudo systemctl restart sshd                              ║${NC}"
+    echo -e "${RED}║                                                            ║${NC}"
+    echo -e "${RED}╚══════════════════════════════════════════════════════════════╝${NC}"
+    echo ""
 
-    # 修改端口
+    # 备份并修改
+    cp /etc/ssh/sshd_config /etc/ssh/sshd_config.bak.$(date +%Y%m%d) 2>/dev/null || true
     if grep -q "^Port" /etc/ssh/sshd_config; then
         sed -i "s/^Port.*/Port ${SSH_PORT}/" /etc/ssh/sshd_config
     else
         echo "Port ${SSH_PORT}" >> /etc/ssh/sshd_config
     fi
-
-    SSH_CHANGED=1
-    echo -e "${RED}╔══════════════════════════════════════════════════════════╗${NC}"
-    echo -e "${RED}║  ⚠️  SSH 端口已修改: ${CUR_PORT} → ${SSH_PORT}                          ║${NC}"
-    echo -e "${RED}║                                                        ║${NC}"
-    echo -e "${RED}║  当前连接仍在使用旧端口 ${CUR_PORT}，不要关闭本窗口！       ║${NC}"
-    echo -e "${RED}║  请立即打开新终端，测试新端口是否能连接：               ║${NC}"
-    echo -e "${RED}║  ssh $(whoami)@$(curl -s4 ifconfig.me 2>/dev/null || echo 'IP') -p ${SSH_PORT}                     ║${NC}"
-    echo -e "${RED}║  确认成功后执行: sudo systemctl restart sshd           ║${NC}"
-    echo -e "${RED}╚══════════════════════════════════════════════════════════╝${NC}"
+    info "SSH 配置文件已修改（sshd 未重启，旧端口仍生效）"
+    warn "请确认新端口可用后再重启 sshd！"
 }
 
 #==============================================================================
@@ -919,7 +945,7 @@ print_summary() {
 #  ██████ 主流程 ██████
 #==============================================================================
 main() {
-    TOTAL=14; STEP=0; SSH_CHANGED=0
+    TOTAL=14; STEP=0
 
     # ── 1. 配置 ──
     setup_config "$@"
@@ -1013,17 +1039,8 @@ main() {
     # ── 摘要 ──
     print_summary
 
-    # ── 14. SSH 端口（放到最后，不重启，用户手动操作）──
+    # ── 14. SSH 端口（所有工作完成后，最后处理）──
     setup_ssh
-
-    if [ "$SSH_CHANGED" = 1 ]; then
-        echo -e "${YELLOW}═══ 部署完成！SSH 端口修改待确认 ═══════════════════${NC}"
-        echo -e "${YELLOW}请打开新终端，用以下命令测试连接：${NC}"
-        echo -e "  ${CYAN}ssh $(whoami)@$(curl -s4 ifconfig.me 2>/dev/null || echo 'IP') -p ${SSH_PORT}${NC}"
-        echo -e "${YELLOW}确认新端口可用后，执行：${NC}"
-        echo -e "  ${CYAN}sudo systemctl restart sshd${NC}"
-        echo ""
-    fi
 }
 
 # 运行
