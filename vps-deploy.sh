@@ -339,7 +339,7 @@ KILLED_PORTS=""
 STOPPED_SERVICES=""
 
 _kill_port() {
-    local port=$1 label=$2
+    local port=$1 label=$2 permanent=${3:-false}
     local pids
     pids=$(fuser ${port}/tcp 2>/dev/null | tr -d ' ')
     if [ -z "$pids" ]; then
@@ -355,8 +355,12 @@ _kill_port() {
         unit=$(systemctl status $pid 2>/dev/null | head -1 | grep -oP '● \K[^ ]+' | sed 's/\.service$//')
         if [ -n "$unit" ] && systemctl is-active --quiet "$unit" 2>/dev/null; then
             systemctl stop "$unit" 2>/dev/null || true
-            STOPPED_SERVICES="${STOPPED_SERVICES}${unit} "
-            KILLED_PORTS="${KILLED_PORTS}  ${YELLOW}端口 ${port}${NC} → 暂停 ${unit} (${label}临时需要) → ${GREEN}稍后自动恢复${NC}\n"
+            if ! $permanent; then
+                STOPPED_SERVICES="${STOPPED_SERVICES}${unit} "
+                KILLED_PORTS="${KILLED_PORTS}  ${YELLOW}端口 ${port}${NC} → 暂停 ${unit} (${label}临时需要) → ${GREEN}稍后自动恢复${NC}\n"
+            else
+                KILLED_PORTS="${KILLED_PORTS}  ${RED}端口 ${port}${NC} → 已停止 ${unit} (${label}永久占用)${NC}\n"
+            fi
         else
             fuser -k ${port}/tcp 2>/dev/null || true
             KILLED_PORTS="${KILLED_PORTS}  ${RED}端口 ${port}${NC} → 进程 ${svc:-未知} (${label}需要) → ${YELLOW}无法自动恢复${NC}\n"
@@ -706,7 +710,7 @@ json.dump(c, open('/usr/local/etc/xray/config.json', 'w'), indent=2)
 
     systemctl daemon-reload
     # 记录并释放 443 端口
-    _kill_port 443 "Xray"
+    _kill_port 443 "Xray" true
     sleep 1
     systemctl enable --now xray > /dev/null 2>&1
     systemctl is-active --quiet xray && info "Xray 已启动 (VLESS Reality + VLESS XHTTP)" || err "Xray 启动失败"
@@ -864,7 +868,7 @@ json.dump(c, open('/usr/local/etc/xray/config.json', 'w'), indent=2)
 
     systemctl daemon-reload
     # 释放 443 端口
-    _kill_port 443 "Xray"
+    _kill_port 443 "Xray" true
     sleep 1
     systemctl enable --now xray > /dev/null 2>&1
     systemctl is-active --quiet xray && info "Xray 配置已更新并重启 ✅" || err "Xray 启动失败，检查 journalctl -u xray"
@@ -971,7 +975,7 @@ EOF
     # 轮询等待证书获取（最多 60 秒，DNS-01 可能需要更长时间）
     for i in $(seq 1 12); do
         sleep 5
-        [ -f /var/lib/hysteria/acme/*.crt ] 2>/dev/null && break
+        ls /var/lib/hysteria/acme/*.crt >/dev/null 2>&1 && break
     done
     # HTTP-01 模式关闭 80 端口
     [ "$ACME_MODE" = "http" ] && ufw delete allow 80/tcp > /dev/null 2>&1
@@ -1078,7 +1082,7 @@ EOF
     # 轮询等待证书获取（最多 60 秒）
     for i in $(seq 1 12); do
         sleep 5
-        [ -f /var/lib/hysteria/acme/*.crt ] 2>/dev/null && break
+        ls /var/lib/hysteria/acme/*.crt >/dev/null 2>&1 && break
     done
     [ "$ACME_MODE" = "http" ] && ufw delete allow 80/tcp > /dev/null 2>&1
     if systemctl is-active --quiet hysteria-server 2>/dev/null; then
@@ -1262,6 +1266,7 @@ HY2_PASS="${HY2_PASS}"
 HY2_SNI="${DOMAIN}"
 XHTTP_UUID="${XHTTP_UUID}"
 XHTTP_PATH="${XHTTP_PATH}"
+NODE_PREFIX="${NODE_PREFIX}"
 NODE_VR="${NODE_PREFIX} ${PROTO_VR}"
 NODE_H2="${NODE_PREFIX} ${PROTO_H2}"
 NODE_VX="${NODE_PREFIX} ${PROTO_VX}"
@@ -1343,7 +1348,7 @@ LEOF
 
 gen_index() {
   cat > "$SUBDIR/index.html" << IEOF
-<!DOCTYPE html><html lang="zh"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0"><title>${NODE_PREFIX}</title><style>*{margin:0;padding:0;box-sizing:border-box}body{background:#0d1117;color:#c9d1d9;font-family:-apple-system,BlinkMacSystemFont,monospace;display:flex;align-items:center;justify-content:center;min-height:100vh}.box{text-align:center}h1{color:#58a6ff;font-size:1.3em;margin-bottom:24px}a{display:block;color:#c9d1d9;text-decoration:none;padding:10px 20px;margin:8px 0;background:#161b22;border:1px solid #30363d;border-radius:6px;transition:border-color .2s}a:hover{border-color:#58a6ff}.tag{color:#8b949e;font-size:.7em;margin-left:8px}</style></head><body><div class="box"><h1>${NODE_PREFIX}</h1><a href=\"${SUBDIR}/clash.yaml\">📥 Clash Verge<span class=\"tag\">clash.yaml</span></a><a href=\"${SUBDIR}/loon.conf\">📱 Loon (iPhone)<span class=\"tag\">loon.conf</span></a><a href=\"/traffic/\">📊 流量看板</a><a href=\"/vps-deploy.sh\">🔧 部署脚本</a></div></body></html>
+<!DOCTYPE html><html lang="zh"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0"><title>${NODE_PREFIX}</title><style>*{margin:0;padding:0;box-sizing:border-box}body{background:#0d1117;color:#c9d1d9;font-family:-apple-system,BlinkMacSystemFont,monospace;display:flex;align-items:center;justify-content:center;min-height:100vh}.box{text-align:center}h1{color:#58a6ff;font-size:1.3em;margin-bottom:24px}a{display:block;color:#c9d1d9;text-decoration:none;padding:10px 20px;margin:8px 0;background:#161b22;border:1px solid #30363d;border-radius:6px;transition:border-color .2s}a:hover{border-color:#58a6ff}.tag{color:#8b949e;font-size:.7em;margin-left:8px}</style></head><body><div class="box"><h1>${NODE_PREFIX}</h1><a href="clash.yaml">📥 Clash Verge<span class="tag">clash.yaml</span></a><a href="loon.conf">📱 Loon (iPhone)<span class="tag">loon.conf</span></a><a href="/traffic/">📊 流量看板</a><a href="/vps-deploy.sh">🔧 部署脚本</a></div></body></html>
 IEOF
   echo "  -> index.html (订阅门户)"
 }
@@ -1718,6 +1723,8 @@ main() {
                 XHTTP_UUID="${VMESS_UUID}"
                 XHTTP_PATH="/$(echo "$XHTTP_UUID" | cut -d- -f1)-xhttp"
                 info "已从旧 VMess 配置迁移到 VLESS XHTTP"
+                warn "⚠️  CDN Tunnel Public Hostname 路径可能仍指向旧的 VMess WS 路径"
+                warn "    请在 Cloudflare 手动更新: Tunnel → Public Hostname → URL 改为 localhost:10001"
             elif [ -z "${XHTTP_UUID:-}" ]; then
                 XHTTP_UUID=$(cat /proc/sys/kernel/random/uuid)
                 XHTTP_PATH="/$(echo "$XHTTP_UUID" | cut -d- -f1)-xhttp"
