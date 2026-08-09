@@ -62,7 +62,7 @@ trap cleanup_tests EXIT
 SUB_ROOT="$test_root/subscription"
 SUB_TOKEN="0123456789abcdef0123456789abcdef0123"
 ENABLE_CDN=true
-NODE_PREFIX="🇯🇵 JP TEST"
+NODE_PREFIX="🇯🇵 JP"
 DOMAIN="node.example.com"
 CDN_DOMAIN="cdn.node.example.com"
 REALITY_PORT=443
@@ -88,7 +88,7 @@ loon_file="$SUB_ROOT/$SUB_TOKEN/loon.conf"
 assert_contains "$clash_file" 'server: cdn.node.example.com' "XHTTP uses the CDN hostname"
 assert_contains "$clash_file" 'port: 443' "CDN client uses TLS port 443"
 assert_contains "$clash_file" 'mode: packet-up' "XHTTP uses the most compatible CDN mode"
-assert_contains "$clash_file" 'name: "🇯🇵 JP TEST VW"' "Clash includes the WebSocket CDN node"
+assert_contains "$clash_file" 'name: "🇯🇵 JP VW"' "Clash includes the WebSocket CDN node"
 assert_contains "$clash_file" 'network: ws' "Clash WebSocket node uses a supported transport"
 assert_not_contains "$clash_file" 'smux:' "nested client mux removed"
 assert_contains "$clash_file" 'proxy-groups:' "Clash profile has a selectable proxy group"
@@ -112,6 +112,8 @@ assert_contains "$REPO_ROOT/vps-deploy.sh" 'managed_listener "$expected"' "same-
 assert_not_contains "$REPO_ROOT/vps-deploy.sh" 'cloudflared service install "$CF_TOKEN"' "Tunnel token is not passed in a process argument"
 assert_contains "$REPO_ROOT/vps-deploy.sh" 'install -m 0600 -o root -g root "$temp_dir/tunnel-token" /etc/cloudflared/token' "Tunnel token is installed with root-only permissions"
 assert_contains "$REPO_ROOT/vps-deploy.sh" 'tunnel run --token-file /etc/cloudflared/token' "cloudflared reads its token from the protected file"
+assert_not_contains "$REPO_ROOT/vps-deploy.sh" 'PROVIDER_ENV' "service-provider input removed"
+assert_not_contains "$REPO_ROOT/vps-deploy.sh" 'STATE_PROVIDER' "service-provider state removed"
 
 BACKUP_ROOT="$test_root/backups"
 printf '%s\n' old > "$test_root/rollback.conf"
@@ -352,7 +354,6 @@ install_dependencies() { record_main_call dependencies; }
 load_state() { record_main_call state; }
 configure_inputs() {
     DOMAIN=node.example.com
-    PROVIDER=TEST
     EMAIL=admin@example.com
     ACME_MODE=http
     CDN_DOMAIN=
@@ -386,8 +387,8 @@ COUNTRY_ENV=JP
 REALITY_TARGET_ENV=www.nic.ad.jp:443
 ACME_MODE_ENV=http
 CDN_DOMAIN_ENV=
-unset STATE_DOMAIN STATE_PROVIDER STATE_EMAIL STATE_ACME_MODE STATE_CDN_DOMAIN
-main node.example.com TEST admin@example.com
+unset STATE_DOMAIN STATE_EMAIL STATE_ACME_MODE STATE_CDN_DOMAIN
+main node.example.com admin@example.com
 [[ " ${main_calls[*]} " == *' health summary '* ]] || fail "non-interactive main did not reach successful handoff"
 [[ " ${main_calls[*]} " == *' platform state inputs dependencies '* ]] || \
     fail "input validation did not run before package installation"

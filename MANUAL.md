@@ -13,6 +13,8 @@
 
 Loon 不支持 XHTTP，因此 Loon 正常情况下只有 `VR / H2 / VW` 三个节点；Clash/Mihomo 有 `VR / H2 / VX / VW` 四个节点。
 
+节点名称格式是“国旗 + 国家码 + 协议缩写”，例如 `🇯🇵 JP VR`。脚本不需要服务商代码，也不会把服务商标识写入状态或订阅。
+
 ## 0. 先理解三个名称
 
 不要混淆以下对象：
@@ -49,7 +51,6 @@ SSH 端口：             <SSH_PORT>
 直连域名：             <DIRECT_DOMAIN>
 CDN 域名：             <CDN_DOMAIN>
 Tunnel 名称：          <TUNNEL_NAME>
-服务商代码：           <PROVIDER>
 ACME 邮箱：            <EMAIL>
 国家代码：             <COUNTRY>
 Reality target：       <REALITY_TARGET>:443
@@ -65,7 +66,6 @@ SSH_PORT=23277
 DIRECT_DOMAIN=jp-bvl.alecyinshis.com
 CDN_DOMAIN=cdn-jp-bvl.alecyinshis.com
 TUNNEL_NAME=cdn-jp-bvl
-PROVIDER=BVL
 EMAIL=alecyinshi@gmail.com
 COUNTRY=JP
 REALITY_TARGET=www.nic.ad.jp:443
@@ -355,7 +355,6 @@ ssh -T <SSH_ALIAS> 'chmod 0700 /root/vps-deploy.sh; bash -n /root/vps-deploy.sh'
   MANAGE_UFW_ENV=1 \
   bash /root/vps-deploy.sh \
     <DIRECT_DOMAIN> \
-    <PROVIDER> \
     <EMAIL>
 
   unset CF_DNS_TOKEN_ENV CF_TOKEN_ENV
@@ -382,7 +381,6 @@ ssh -T <SSH_ALIAS> 'chmod 0700 /root/vps-deploy.sh; bash -n /root/vps-deploy.sh'
   MANAGE_UFW_ENV=1 \
   bash /root/vps-deploy.sh \
     jp-bvl.alecyinshis.com \
-    BVL \
     alecyinshi@gmail.com
 
   unset CF_DNS_TOKEN_ENV CF_TOKEN_ENV
@@ -543,10 +541,10 @@ bash /root/vps-deploy.sh --check
 6. 进入 Proxies，确认出现：
 
 ```text
-<国家> <服务商> VR
-<国家> <服务商> H2
-<国家> <服务商> VX
-<国家> <服务商> VW
+<国家> VR
+<国家> H2
+<国家> VX
+<国家> VW
 ```
 
 ### 13.2 作为主配置的 proxy-provider

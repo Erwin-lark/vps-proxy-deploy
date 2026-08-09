@@ -8,7 +8,7 @@
 
 原 v3.1.1 不能作为“任意新 VPS 上可靠一键部署”的版本。它包含多项必现或高概率关键故障，其中一些是历史日志中已经修过、随后又被新提交重新引入的回归；另一些来自 CHANGELOG 中未经上游文档验证的技术假设。
 
-v4 已重构关键路径；v4.1 为 Loon 增加了官方支持的 VLESS WebSocket CDN 节点；v4.1.1 又修复了输入校验晚于 `apt-get`、全新 Tunnel Token 出现在进程参数、origin 验收未强制回环监听等问题。本地验证覆盖 Bash 语法、ShellCheck、官方 Xray 配置解析、官方 Hysteria 实际启动解析、Mihomo 客户端配置解析，以及 XHTTP/WebSocket 分别经真实 Caddy 的端到端模拟，共 40 项回归断言。v4.1.0 已在现有 Ubuntu 22.04 `jp-bvl` 上完成从 v4.0 重跑，Reality、Hysteria2、XHTTP、WebSocket 四协议真实出站和服务状态均通过；v4.1.1 尚未声称完成一台可销毁的全新 Ubuntu/Debian VPS 系统级首装验证。
+v4 已重构关键路径；v4.1 为 Loon 增加了官方支持的 VLESS WebSocket CDN 节点；v4.1.1 又修复了输入校验晚于 `apt-get`、全新 Tunnel Token 出现在进程参数、origin 验收未强制回环监听等问题；v4.1.2 删除了服务商代码输入、状态和节点命名。本地验证覆盖 Bash 语法、ShellCheck、官方 Xray 配置解析、官方 Hysteria 实际启动解析、Mihomo 客户端配置解析，以及 XHTTP/WebSocket 分别经真实 Caddy 的端到端模拟，共 42 项回归断言。v4.1.0 已在现有 Ubuntu 22.04 `jp-bvl` 上完成从 v4.0 重跑，Reality、Hysteria2、XHTTP、WebSocket 四协议真实出站和服务状态均通过；v4.1.2 尚未声称完成一台可销毁的全新 Ubuntu/Debian VPS 系统级首装验证。
 
 ## 已确认的关键缺陷
 
@@ -24,7 +24,7 @@ v4 已重构关键路径；v4.1 为 Loon 增加了官方支持的 VLESS WebSocke
 | High | 防火墙可能清空用户规则 | v3 以规则中是否出现字符串 `SSH` 判断首次运行，条件命中就 `ufw --force reset` | 只增量添加规则，从不 reset 或删除既有规则 |
 | High | 会停止服务或杀死未知进程 | `_kill_port` 会停止 systemd 服务，无法识别时直接 `fuser -k`；非交互模式也可能发生 | 端口冲突只报告并停止部署，不自动停止/杀进程 |
 | High | 自动 SSH 加固/删用户超出代理部署范围 | v3 自动禁密码、写 SSH 配置、删除 `ubuntu` 用户和 sudoers 文件；仅检查 root key，无法证明当前登录路径安全 | v4 不修改 SSH 认证、不换端口、不删用户；只检测当前实际端口供 UFW/fail2ban 使用 |
-| High | 命令行/环境变量可污染被 source 的状态 | 非交互 domain/provider 未统一校验，随后写入并 `source /etc/vps-proxy/subs.conf` | 所有输入白名单校验；v4 状态用 `%q` 安全写入；旧文件只逐字段读取和格式验证 |
+| High | 命令行/环境变量可污染被 source 的状态 | 非交互输入未统一校验，随后写入并 `source /etc/vps-proxy/subs.conf` | 所有输入白名单校验；v4 状态用 `%q` 安全写入；旧文件只逐字段读取和格式验证 |
 | High | 更新配置未必重启 Xray | v3 的 config-only 路径写完配置后执行 `systemctl enable --now`；服务已 active 时不会重启 | 配置先解析，再原子安装，然后明确 `systemctl restart` 和状态检查 |
 | High | 明文 HTTP 分发全部节点凭证 | v3 在公网 `http://domain:8443/<token>` 提供 UUID、密码和公钥配置 | 在线订阅仅经 Cloudflare HTTPS；未启用 CDN 时只保留 root 可读本地文件 |
 | High | 下载“latest”且不校验内容 | Xray 脚本远程执行、Hysteria/cloudflared 仅检查非空；404/HTML 也可能被移动为二进制 | 固定版本和每架构 SHA-256；CI 使用同一固定验证器 |
@@ -70,7 +70,7 @@ v4 已重构关键路径；v4.1 为 Loon 增加了官方支持的 VLESS WebSocke
 | Xray WebSocket → Caddy → Xray → HTTP 目标端到端模拟 | 通过 |
 | 非交互 `main` 全路径无副作用模拟 | 通过 |
 | 旧配置备份与失败恢复模拟 | 通过 |
-| 安全/回归断言 | 40 项通过 |
+| 安全/回归断言 | 42 项通过 |
 | 现有 Ubuntu 22.04 `jp-bvl` 从 v4.0 重跑、四协议真实出站、服务重启后复检 | 通过 |
 
 CI 文件：`.github/workflows/validate.yml`

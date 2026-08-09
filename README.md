@@ -9,6 +9,8 @@
 
 v4 的目标是可审计、可重跑、失败不伪装成成功。脚本不依赖任何既有 VPS，也不会修改 SSH 登录方式、删除用户、清空既有防火墙规则或自动杀死端口占用进程。
 
+节点名称只包含国旗、国家码和协议缩写，例如 `🇯🇵 JP VR`；v4.1.2 起不再要求、保存或显示服务商代码。
+
 首次部署、Cloudflare 两枚 Token、Tunnel “尚未检测到连接”、Public Hostname、Clash/Loon 导入、统一测速、更新、回滚和逐项排错，请直接阅读 **[从零部署超详细手册](MANUAL.md)**。
 
 ## 支持范围
@@ -50,10 +52,12 @@ chmod +x vps-deploy.sh
 sudo bash vps-deploy.sh
 ```
 
+若同时下载了 `SHA256SUMS`，先在 Linux 执行 `sha256sum -c SHA256SUMS`，或在 macOS 执行 `shasum -a 256 -c SHA256SUMS`，确认脚本与发布版本一致。
+
 基础非交互部署（Reality + Hysteria2）：
 
 ```bash
-sudo bash vps-deploy.sh node.example.com BVL admin@example.com
+sudo bash vps-deploy.sh node.example.com admin@example.com
 ```
 
 加入 Cloudflare Tunnel/XHTTP/WebSocket：
@@ -61,7 +65,7 @@ sudo bash vps-deploy.sh node.example.com BVL admin@example.com
 ```bash
 CDN_DOMAIN_ENV=cdn.node.example.com \
 CF_TOKEN_ENV='eyJ...' \
-sudo -E bash vps-deploy.sh node.example.com BVL admin@example.com
+sudo -E bash vps-deploy.sh node.example.com admin@example.com
 ```
 
 DNS-01（无需 HTTP-01，但每次重写 Hysteria 配置时都要重新传 Token）：
@@ -69,7 +73,7 @@ DNS-01（无需 HTTP-01，但每次重写 Hysteria 配置时都要重新传 Toke
 ```bash
 ACME_MODE_ENV=dns \
 CF_DNS_TOKEN_ENV='Cloudflare-DNS-API-Token' \
-sudo -E bash vps-deploy.sh node.example.com BVL admin@example.com
+sudo -E bash vps-deploy.sh node.example.com admin@example.com
 ```
 
 DNS-01 + CDN：
@@ -79,7 +83,7 @@ ACME_MODE_ENV=dns \
 CF_DNS_TOKEN_ENV='Cloudflare-DNS-API-Token' \
 CDN_DOMAIN_ENV=cdn.node.example.com \
 CF_TOKEN_ENV='eyJ...' \
-sudo -E bash vps-deploy.sh node.example.com BVL admin@example.com
+sudo -E bash vps-deploy.sh node.example.com admin@example.com
 ```
 
 ## Cloudflare Public Hostname
@@ -137,7 +141,7 @@ DNS Token 只写入权限为 `root:hysteria 640` 的 Hysteria 配置，不写入
 UFW 采用增量规则，不执行 `ufw reset`。如果要自行管理防火墙：
 
 ```bash
-MANAGE_UFW_ENV=0 sudo -E bash vps-deploy.sh node.example.com BVL admin@example.com
+MANAGE_UFW_ENV=0 sudo -E bash vps-deploy.sh node.example.com admin@example.com
 ```
 
 脚本遇到端口冲突会停止并报告，不会停止服务或 `fuser -k` 杀进程。
@@ -178,7 +182,6 @@ Loon 可在主配置 `[General]` 中设置 `proxy-test-url = https://cp.cloudfla
 | 变量 | 用途 |
 |---|---|
 | `DOMAIN_ENV` | 直连域名 |
-| `PROVIDER_ENV` | 1-16 位节点服务商代码 |
 | `EMAIL_ENV` | ACME 邮箱 |
 | `COUNTRY_ENV` | 两位国家码；自动检测失败或需覆盖时使用 |
 | `REALITY_TARGET_ENV` | `host:443`；未知地区必须显式设置 |

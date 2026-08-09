@@ -5,7 +5,7 @@
 set -Eeuo pipefail
 umask 027
 
-SCRIPT_VERSION="4.1.1"
+SCRIPT_VERSION="4.1.2"
 XRAY_VERSION="v26.3.27"
 HYSTERIA_VERSION="app/v2.12.1"
 CADDY_VERSION="v2.11.4"
@@ -77,21 +77,21 @@ VPS 代理部署脚本 v4
   sudo bash vps-deploy.sh
 
 非交互安装：
-  sudo bash vps-deploy.sh DOMAIN PROVIDER EMAIL
+  sudo bash vps-deploy.sh DOMAIN EMAIL
 
 DNS-01（Cloudflare）：
   ACME_MODE_ENV=dns CF_DNS_TOKEN_ENV='...' \
-    sudo -E bash vps-deploy.sh DOMAIN PROVIDER EMAIL
+    sudo -E bash vps-deploy.sh DOMAIN EMAIL
 
 启用 Cloudflare Tunnel + XHTTP + WebSocket + HTTPS 订阅：
   CDN_DOMAIN_ENV=cdn.example.com CF_TOKEN_ENV='eyJ...' \
-    sudo -E bash vps-deploy.sh node.example.com PROVIDER EMAIL
+    sudo -E bash vps-deploy.sh node.example.com EMAIL
 
 只读验收：
   sudo bash vps-deploy.sh --check
 
 可选环境变量：
-  DOMAIN_ENV, PROVIDER_ENV, EMAIL_ENV, COUNTRY_ENV, REALITY_TARGET_ENV
+  DOMAIN_ENV, EMAIL_ENV, COUNTRY_ENV, REALITY_TARGET_ENV
   ACME_MODE_ENV=http|dns, CF_DNS_TOKEN_ENV
   CDN_DOMAIN_ENV, CF_TOKEN_ENV
   MANAGE_UFW_ENV=0|1, SKIP_DNS_CHECK_ENV=0|1
@@ -100,7 +100,6 @@ EOF
 
 MODE="install"
 ARG_DOMAIN=""
-ARG_PROVIDER=""
 ARG_EMAIL=""
 NON_INTERACTIVE=false
 
@@ -113,10 +112,9 @@ parse_args() {
         MODE="check"
         shift
     fi
-    [[ $# -le 3 ]] || die "参数过多；使用 --help 查看用法"
+    [[ $# -le 2 ]] || die "参数过多；使用 --help 查看用法"
     ARG_DOMAIN="${1:-}"
-    ARG_PROVIDER="${2:-}"
-    ARG_EMAIL="${3:-}"
+    ARG_EMAIL="${2:-}"
     if [[ -n "$ARG_DOMAIN" || -n "${DOMAIN_ENV:-}" ]]; then
         NON_INTERACTIVE=true
     fi
@@ -272,7 +270,6 @@ prompt_value() {
 
 configure_inputs() {
     DOMAIN=$(normalize_domain "${DOMAIN_ENV:-${ARG_DOMAIN:-${STATE_DOMAIN:-}}}")
-    PROVIDER="${PROVIDER_ENV:-${ARG_PROVIDER:-${STATE_PROVIDER:-}}}"
     EMAIL="${EMAIL_ENV:-${ARG_EMAIL:-${STATE_EMAIL:-}}}"
     ACME_MODE="${ACME_MODE_ENV:-${STATE_ACME_MODE:-http}}"
     CF_DNS_TOKEN="${CF_DNS_TOKEN_ENV:-}"
@@ -285,7 +282,6 @@ configure_inputs() {
         while ! valid_domain "$DOMAIN"; do
             DOMAIN=$(normalize_domain "$(prompt_value '直连节点域名（DNS only）' "$DOMAIN")")
         done
-        PROVIDER=$(prompt_value "服务商代码" "${PROVIDER:-VPS}")
         while ! valid_email "$EMAIL"; do
             EMAIL=$(prompt_value "Let's Encrypt 联系邮箱" "$EMAIL")
         done
@@ -304,9 +300,7 @@ configure_inputs() {
     fi
 
     valid_domain "$DOMAIN" || die "域名格式无效：$DOMAIN"
-    PROVIDER=$(printf '%s' "$PROVIDER" | tr '[:lower:]' '[:upper:]')
-    [[ "$PROVIDER" =~ ^[A-Z0-9][A-Z0-9_-]{0,15}$ ]] || die "服务商代码仅允许 1-16 位字母、数字、_、-"
-    valid_email "$EMAIL" || die "必须提供有效邮箱；非交互用第三个参数或 EMAIL_ENV"
+    valid_email "$EMAIL" || die "必须提供有效邮箱；非交互用第二个参数或 EMAIL_ENV"
     [[ "$ACME_MODE" == "http" || "$ACME_MODE" == "dns" ]] || die "ACME_MODE_ENV 只能是 http 或 dns"
     [[ "$MANAGE_UFW" == "0" || "$MANAGE_UFW" == "1" ]] || die "MANAGE_UFW_ENV 只能是 0 或 1"
     [[ "$SKIP_DNS_CHECK" == "0" || "$SKIP_DNS_CHECK" == "1" ]] || die "SKIP_DNS_CHECK_ENV 只能是 0 或 1"
@@ -328,7 +322,7 @@ configure_inputs() {
         CF_TOKEN=$(grep -oE 'eyJ[A-Za-z0-9_+/=-]+' <<<"$CF_TOKEN" | head -n 1 || true)
         [[ -n "$CF_TOKEN" ]] || die "Cloudflare Tunnel Token 格式无效"
     fi
-    info "直连域名：${DOMAIN}；服务商：${PROVIDER}；ACME：${ACME_MODE}；CDN：${ENABLE_CDN}"
+    info "直连域名：${DOMAIN}；ACME：${ACME_MODE}；CDN：${ENABLE_CDN}"
 }
 
 detect_region() {
@@ -348,7 +342,7 @@ else:
     print('🏳️')
 PY
 )
-    NODE_PREFIX="${FLAG} ${COUNTRY} ${PROVIDER}"
+    NODE_PREFIX="${FLAG} ${COUNTRY}"
 
     REALITY_TARGET="${REALITY_TARGET_ENV:-${STATE_REALITY_TARGET:-}}"
     if [[ -z "$REALITY_TARGET" ]]; then
@@ -1163,7 +1157,6 @@ write_state() {
     {
         printf 'STATE_VERSION=%q\n' "$SCRIPT_VERSION"
         printf 'STATE_DOMAIN=%q\n' "$DOMAIN"
-        printf 'STATE_PROVIDER=%q\n' "$PROVIDER"
         printf 'STATE_EMAIL=%q\n' "$EMAIL"
         printf 'STATE_ACME_MODE=%q\n' "$ACME_MODE"
         printf 'STATE_CDN_DOMAIN=%q\n' "$CDN_DOMAIN"
@@ -1657,7 +1650,6 @@ load_check_state() {
     [[ -f "$STATE_FILE" ]] || die "未找到 v4 状态文件：$STATE_FILE"
     load_state
     DOMAIN=${STATE_DOMAIN:?}
-    PROVIDER=${STATE_PROVIDER:?}
     EMAIL=${STATE_EMAIL:?}
     ACME_MODE=${STATE_ACME_MODE:?}
     CDN_DOMAIN=${STATE_CDN_DOMAIN:-}
@@ -1672,7 +1664,7 @@ c=sys.argv[1]
 print(''.join(chr(0x1F1E6 + ord(x)-65) for x in c) if len(c)==2 and c!='XX' else '🏳️')
 PY
 )
-    NODE_PREFIX="${FLAG} ${COUNTRY} ${PROVIDER}"
+    NODE_PREFIX="${FLAG} ${COUNTRY}"
     VR_CLASH_UUID=${STATE_VR_CLASH_UUID:?}
     VR_LOON_UUID=${STATE_VR_LOON_UUID:?}
     HY2_PASS=${STATE_HY2_PASS:?}
