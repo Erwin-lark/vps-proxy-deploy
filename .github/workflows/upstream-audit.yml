@@ -1,0 +1,57 @@
+name: upstream-audit
+
+on:
+  push:
+    paths:
+      - vps-deploy.sh
+      - .github/workflows/upstream-audit.yml
+  schedule:
+    - cron: '17 3 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  compare-releases:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Compare pinned versions with official latest releases
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+
+          pinned_xray=$(sed -n 's/^XRAY_VERSION="\([^"]*\)"/\1/p' vps-deploy.sh)
+          pinned_hysteria=$(sed -n 's/^HYSTERIA_VERSION="\([^"]*\)"/\1/p' vps-deploy.sh)
+          pinned_caddy=$(sed -n 's/^CADDY_VERSION="\([^"]*\)"/\1/p' vps-deploy.sh)
+          pinned_cloudflared=$(sed -n 's/^CLOUDFLARED_VERSION="\([^"]*\)"/\1/p' vps-deploy.sh)
+
+          outdated=0
+          printf '%s\n' '## Upstream release audit' '' '| Component | Pinned | Latest | Result |' '|---|---:|---:|---|' > "$GITHUB_STEP_SUMMARY"
+
+          check_release() {
+            local name=$1 repo=$2 pinned=$3 latest result
+            latest=$(gh api "repos/${repo}/releases/latest" --jq '.tag_name')
+            result='current'
+            if [[ "$pinned" != "$latest" ]]; then
+              result='review required'
+              outdated=1
+              printf '::warning title=%s update available::Pinned %s; latest official release %s\n' "$name" "$pinned" "$latest"
+            fi
+            printf '| %s | `%s` | `%s` | %s |\n' "$name" "$pinned" "$latest" "$result" >> "$GITHUB_STEP_SUMMARY"
+          }
+
+          check_release Xray-core XTLS/Xray-core "$pinned_xray"
+          check_release Hysteria apernet/hysteria "$pinned_hysteria"
+          check_release Caddy caddyserver/caddy "$pinned_caddy"
+          check_release cloudflared cloudflare/cloudflared "$pinned_cloudflared"
+
+          if (( outdated )); then
+            printf '%s\n' '' 'At least one pinned version needs compatibility and checksum review.' >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
