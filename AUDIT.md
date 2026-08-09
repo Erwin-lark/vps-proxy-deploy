@@ -8,7 +8,7 @@
 
 原 v3.1.1 不能作为“任意新 VPS 上可靠一键部署”的版本。它包含多项必现或高概率关键故障，其中一些是历史日志中已经修过、随后又被新提交重新引入的回归；另一些来自 CHANGELOG 中未经上游文档验证的技术假设。
 
-v4 已重构关键路径；v4.1 为 Loon 增加了官方支持的 VLESS WebSocket CDN 节点；v4.1.1 又修复了输入校验晚于 `apt-get`、全新 Tunnel Token 出现在进程参数、origin 验收未强制回环监听等问题；v4.1.2 删除了服务商代码输入、状态和节点命名。本地验证覆盖 Bash 语法、ShellCheck、官方 Xray 配置解析、官方 Hysteria 实际启动解析、Mihomo 客户端配置解析，以及 XHTTP/WebSocket 分别经真实 Caddy 的端到端模拟，共 42 项回归断言。v4.1.0 已在现有 Ubuntu 22.04 `jp-bvl` 上完成从 v4.0 重跑，Reality、Hysteria2、XHTTP、WebSocket 四协议真实出站和服务状态均通过；v4.1.2 尚未声称完成一台可销毁的全新 Ubuntu/Debian VPS 系统级首装验证。
+v4 已重构关键路径；v4.1 为 Loon 增加了官方支持的 VLESS WebSocket CDN 节点；v4.1.1 又修复了输入校验晚于 `apt-get`、全新 Tunnel Token 出现在进程参数、origin 验收未强制回环监听等问题；v4.1.2 删除了服务商代码输入、状态和节点命名。本地验证覆盖 Bash 语法、ShellCheck、官方 Xray 配置解析、官方 Hysteria 实际启动解析、Mihomo 客户端配置解析，以及 XHTTP/WebSocket 分别经真实 Caddy 的端到端模拟，共 42 项回归断言。v4.1.2 已在现有 Ubuntu 22.04 `jp-bvl` 上完成从 v4.1.0 重跑，服务商状态迁移、Reality、Hysteria2、XHTTP、WebSocket 四协议真实出站和服务状态均通过；尚未声称完成一台可销毁的全新 Ubuntu/Debian VPS 系统级首装验证。
 
 ## 已确认的关键缺陷
 
@@ -71,7 +71,7 @@ v4 已重构关键路径；v4.1 为 Loon 增加了官方支持的 VLESS WebSocke
 | 非交互 `main` 全路径无副作用模拟 | 通过 |
 | 旧配置备份与失败恢复模拟 | 通过 |
 | 安全/回归断言 | 42 项通过 |
-| 现有 Ubuntu 22.04 `jp-bvl` 从 v4.0 重跑、四协议真实出站、服务重启后复检 | 通过 |
+| 现有 Ubuntu 22.04 `jp-bvl` 更新至 v4.1.2、服务商状态迁移、四协议真实出站、服务重启后复检 | 通过 |
 
 CI 文件：`.github/workflows/validate.yml`
 本地测试：`tests/audit-tests.sh`

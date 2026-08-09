@@ -22,6 +22,9 @@
 - README 和超详细手册中的安装命令、参数清单及节点名称同步更新。
 - 新增 `SHA256SUMS`，CI 会在任何解析或测试前验证部署脚本摘要。
 - 新增每周一及手动可运行的上游版本审计，对比 Xray、Hysteria、Caddy、cloudflared 的官方 latest release；发现差异会让工作流失败并要求人工复核兼容性与校验值。
+- 已在现有 Ubuntu 22.04 `jp-bvl` 从 v4.1.0 重跑 v4.1.2：Xray、Hysteria2、Caddy、cloudflared 均为 active，Reality、Hysteria2、XHTTP、WebSocket 四协议真实出站全部通过。
+- 重跑后 `/etc/vps-proxy/state.env` 为 `STATE_VERSION=4.1.2`，不再含 `STATE_PROVIDER`；Clash/Loon 订阅不再含旧服务商名称，并已生成新的国家码节点名称。
+- 10000/10001/10002 继续只监听 `127.0.0.1`；公网入口保持 Xray TCP 443 与 Hysteria UDP 443。
 
 ## v4.1.1 — 首装失败安全、Token 防泄露与移动端重连 (2026-08-09)
 
