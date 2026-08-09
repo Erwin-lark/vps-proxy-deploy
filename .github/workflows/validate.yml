@@ -1,0 +1,57 @@
+name: validate
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  audit-tests:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install static analysis dependencies
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq shellcheck unzip
+
+      - name: Download pinned config validators
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mkdir -p /tmp/vps-proxy-validators
+          curl -fL --retry 3 -o /tmp/vps-proxy-validators/xray.zip \
+            https://github.com/XTLS/Xray-core/releases/download/v26.3.27/Xray-linux-64.zip
+          echo '23cd9af937744d97776ee35ecad4972cf4b2109d1e0fe6be9930467608f7c8ae  /tmp/vps-proxy-validators/xray.zip' | sha256sum -c -
+          unzip -q /tmp/vps-proxy-validators/xray.zip xray geoip.dat geosite.dat -d /tmp/vps-proxy-validators
+
+          curl -fL --retry 3 -o /tmp/vps-proxy-validators/hysteria \
+            https://github.com/apernet/hysteria/releases/download/app/v2.12.1/hysteria-linux-amd64
+          echo 'ffc032c7ca6b78676d337097ca7f61bebc3a90a4f3a656693adf368f304cdbc7  /tmp/vps-proxy-validators/hysteria' | sha256sum -c -
+
+          curl -fL --retry 3 -o /tmp/vps-proxy-validators/mihomo.gz \
+            https://github.com/MetaCubeX/mihomo/releases/download/v1.19.29/mihomo-linux-amd64-v1.19.29.gz
+          echo '60de76a35a6cbf7b4fa4a20f5c257c24345d1d635ab1aa3877022a1997ef413c  /tmp/vps-proxy-validators/mihomo.gz' | sha256sum -c -
+          gzip -d /tmp/vps-proxy-validators/mihomo.gz
+
+          curl -fL --retry 3 -o /tmp/vps-proxy-validators/caddy.tar.gz \
+            https://github.com/caddyserver/caddy/releases/download/v2.11.4/caddy_2.11.4_linux_amd64.tar.gz
+          echo '527fbf917c39189a1e3b31d34fa955601680b2d5c8055d2a87b8b9588dec7bb9  /tmp/vps-proxy-validators/caddy.tar.gz' | sha256sum -c -
+          tar -xzf /tmp/vps-proxy-validators/caddy.tar.gz -C /tmp/vps-proxy-validators caddy
+          chmod +x /tmp/vps-proxy-validators/{xray,hysteria,mihomo,caddy}
+
+      - name: Bash and ShellCheck
+        run: |
+          bash -n vps-deploy.sh tests/audit-tests.sh
+          shellcheck -S style vps-deploy.sh tests/audit-tests.sh
+
+      - name: Config and regression tests
+        env:
+          XRAY_BIN: /tmp/vps-proxy-validators/xray
+          XRAY_ASSET_DIR: /tmp/vps-proxy-validators
+          HYSTERIA_BIN: /tmp/vps-proxy-validators/hysteria
+          MIHOMO_BIN: /tmp/vps-proxy-validators/mihomo
+          CADDY_BIN: /tmp/vps-proxy-validators/caddy
+        run: bash tests/audit-tests.sh
