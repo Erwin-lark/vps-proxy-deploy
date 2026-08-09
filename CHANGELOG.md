@@ -6,6 +6,23 @@
 
 ---
 
+## v4.1.3 — 首装恢复与教程防错 (2026-08-09)
+
+### 首装可恢复性
+
+- 新增 `root:root 600` 的 `/etc/vps-proxy/install-phase`，安装中断后会明确报告上次停留阶段，不把局部成功伪装成完整成功。
+- 已生成的 UUID、密码、路径和订阅 Token 先写入 `/etc/vps-proxy/state.pending`；只有健康检查全部通过后才原子提升为 `state.env`，失败重跑不再无意更换客户端凭证。
+- Hysteria 服务启动前会检查 `/var/lib/hysteria/acme`。只包含同文件系普通文件/目录的遗留树会以不跟随链接的方式修正为 `hysteria:hysteria`；发现符号链接、硬链接、特殊文件或嵌套挂载则安全停止。
+- fail2ban 启动增加有界重试和 `reset-failed`；`--check` 会明确报告 active 或 degraded，便于区分“代理可用”与“SSH 防暴力尝试就绪”。
+
+### 手册与实际验证
+
+- SSH 流程同时覆盖 root 和云厂商默认普通 sudo 用户，加入免密 sudo 与非敏感环境变量继承预检，不再要求小白为教程开启 root SSH。
+- Cloudflare 步骤更新为当前 `Networking → Tunnels → Routes → Add route → Published application`，明确新界面的完整 `http://127.0.0.1:10000` Service URL、多 Zone 下拉选择、Routes 计数、proxied CNAME 和 TLS 传播检查。
+- DNS 排错增加 Clash/Mihomo TUN/Fake-IP 对 `dig @1.1.1.1` 的影响说明；返回 `198.18.0.0/15` 时改从 VPS 的独立网络复核。
+- 在 Ubuntu 22.04 GCP e2-micro `us-gcp` 执行首次安装：发现旧 ACME 目录的 `root:root` 遗留会使 Hysteria 拒绝启动；修正属主后重跑通过 Reality、Hysteria2 直连自测。Tunnel 连接后还必须手动新建 Published application；选对 Zone 后 XHTTP、WebSocket、Clash/Loon HTTPS 订阅均通过。
+- 回归断言增加 ACME 安全对象白名单、待提交状态重载/提升时序和 fail2ban 降级状态；完整验证数增至 49 项。
+
 ## v4.1.2 — 删除服务商代码 (2026-08-09)
 
 ### 接口与节点命名

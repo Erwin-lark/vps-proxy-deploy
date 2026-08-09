@@ -8,7 +8,7 @@
 
 原 v3.1.1 不能作为“任意新 VPS 上可靠一键部署”的版本。它包含多项必现或高概率关键故障，其中一些是历史日志中已经修过、随后又被新提交重新引入的回归；另一些来自 CHANGELOG 中未经上游文档验证的技术假设。
 
-v4 已重构关键路径；v4.1 为 Loon 增加了官方支持的 VLESS WebSocket CDN 节点；v4.1.1 又修复了输入校验晚于 `apt-get`、全新 Tunnel Token 出现在进程参数、origin 验收未强制回环监听等问题；v4.1.2 删除了服务商代码输入、状态和节点命名。本地验证覆盖 Bash 语法、ShellCheck、官方 Xray 配置解析、官方 Hysteria 实际启动解析、Mihomo 客户端配置解析，以及 XHTTP/WebSocket 分别经真实 Caddy 的端到端模拟，共 42 项回归断言。v4.1.2 已在现有 Ubuntu 22.04 `jp-bvl` 上完成从 v4.1.0 重跑，服务商状态迁移、Reality、Hysteria2、XHTTP、WebSocket 四协议真实出站和服务状态均通过；尚未声称完成一台可销毁的全新 Ubuntu/Debian VPS 系统级首装验证。
+v4 已重构关键路径；v4.1 为 Loon 增加了官方支持的 VLESS WebSocket CDN 节点；v4.1.1 修复了输入校验、Tunnel Token 进程参数暴露和 origin 回环验收；v4.1.2 删除服务商代码；v4.1.3 根据 GCP 首装中的实际故障，增加了 Hysteria ACME 遗留属主安全修复、失败阶段记录、待提交状态和 fail2ban 降级报告。本地验证覆盖 Bash 语法、ShellCheck、官方 Xray/Hysteria/Mihomo 解析或启动验证，以及 XHTTP/WebSocket 分别经真实 Caddy 的端到端模拟，共 49 项回归断言。Ubuntu 22.04 GCP e2-micro `us-gcp` 已通过首次脚本安装、Reality/Hysteria2 直连自测、Tunnel 连接和 Cloudflare Published application 后的 XHTTP/WebSocket 与 Clash/Loon HTTPS 订阅验收；但该机存在先前留下的 ACME 目录，仍不等价于一台完全干净、可销毁 VPS 的首装证明。
 
 ## 已确认的关键缺陷
 
@@ -29,6 +29,7 @@ v4 已重构关键路径；v4.1 为 Loon 增加了官方支持的 VLESS WebSocke
 | High | 明文 HTTP 分发全部节点凭证 | v3 在公网 `http://domain:8443/<token>` 提供 UUID、密码和公钥配置 | 在线订阅仅经 Cloudflare HTTPS；未启用 CDN 时只保留 root 可读本地文件 |
 | High | 下载“latest”且不校验内容 | Xray 脚本远程执行、Hysteria/cloudflared 仅检查非空；404/HTML 也可能被移动为二进制 | 固定版本和每架构 SHA-256；CI 使用同一固定验证器 |
 | High | 全新 Tunnel Token 作为进程参数传给 cloudflared | `cloudflared service install "$CF_TOKEN"` 会把 Token 放入子进程参数；同机特权观察者可读取 | v4.1.1 写入 `root:root 600` token 文件，受管 systemd 单元只使用 `--token-file` |
+| High | 旧 Hysteria ACME 数据可使新服务用户无法启动 | `us-gcp` 首装时 `/var/lib/hysteria/acme` 内层为 `root:root 700/600`，hysteria 日志报 `permission denied` | v4.1.3 只对同文件系普通文件/目录执行 no-dereference 改权；链接、特殊文件或嵌套挂载会安全停止 |
 | Medium | ACME 证书等待仍检查错目录 | v3.1.1 从 `[ -f glob ]` 改成顶层 `ls *.crt`，但 CertMagic 证书通常在多层目录 | 使用递归 `find`，服务就绪还以真实 UDP 监听和协议自测为准 |
 | Medium | 端口预检漏掉 UDP 443 | `_check_port` 始终调用 `ss -tlnp`，所以 Hysteria 的 UDP 冲突不可见 | TCP/UDP 分开检查 |
 | Medium | 文档称会接管 8443，实际从未调用接管函数 | Caddy 遇到冲突只会启动失败 | v4 不公开 8443，Caddy 只监听本地 10000；冲突时安全停止 |
@@ -36,6 +37,7 @@ v4 已重构关键路径；v4.1 为 Loon 增加了官方支持的 VLESS WebSocke
 | Medium | Loon 生成未受官方支持的 XHTTP | Loon 官方协议列表包含 VLESS WS/HTTP/Reality，没有 XHTTP | v4.1 为 Loon 生成 Reality + Hysteria2 + VLESS WebSocket；XHTTP 仅写入 Mihomo 配置 |
 | Medium | 无效输入仍先修改软件包状态 | main 在 `configure_inputs` 前执行 `apt-get update/install` | v4.1.1 先读取状态并验证所有输入；依赖齐全的重跑完全跳过 apt |
 | Medium | CDN 内部端口验收只验证“有人监听” | `ss ... | grep -q .` 无法证明 10000/10001/10002 未意外暴露到公网地址 | v4.1.1 强制匹配 `127.0.0.1:<port>`，偏离即判关键验收失败 |
+| Medium | 首装失败后没有持久阶段与未提交凭证 | 失败可发生在 UFW/sysctl 已改动、凭证已写入配置但正式状态未写入之间 | v4.1.3 增加 `install-phase` 和 `state.pending`；重跑复用凭证，健康检查后才提交 |
 | Medium | 首次步骤计数与重跑不一致 | 首次 `generate_keys` 不调用 `step`，重跑分支才调用 | v4 移除误导性步骤计数，改为结果导向日志 |
 | Low | 订阅门户的“部署脚本”链接仍 404 | HTML 链接修成 `/vps-deploy.sh`，但从未把文件放进 document root | 移除无效链接 |
 
@@ -52,7 +54,7 @@ v4 已重构关键路径；v4.1 为 Loon 增加了官方支持的 VLESS WebSocke
 - “XHTTP 迁移要更新 Tunnel 路径”：Public Hostname 的 origin URL 与 XHTTP HTTP path 是两层概念。正确架构应由本地 HTTP 路由器按 path 分发。
 - “协议优化可以把任意节点做到 100 ms 以下”：不成立。传播距离和运营商路由决定基础 RTT。
 
-## v4.1 验证矩阵
+## v4.1.3 验证矩阵
 
 | 验证 | 结果 |
 |---|---|
@@ -70,8 +72,9 @@ v4 已重构关键路径；v4.1 为 Loon 增加了官方支持的 VLESS WebSocke
 | Xray WebSocket → Caddy → Xray → HTTP 目标端到端模拟 | 通过 |
 | 非交互 `main` 全路径无副作用模拟 | 通过 |
 | 旧配置备份与失败恢复模拟 | 通过 |
-| 安全/回归断言 | 42 项通过 |
+| 安全/回归断言 | 49 项通过 |
 | 现有 Ubuntu 22.04 `jp-bvl` 更新至 v4.1.2、服务商状态迁移、四协议真实出站、服务重启后复检 | 通过 |
+| Ubuntu 22.04 GCP e2-micro `us-gcp` 首装、故障复现、重跑、Cloudflare 新控制台路由与四协议/订阅验收 | 通过；机内存在旧 ACME 遗留，不视为纯净首装 |
 
 CI 文件：`.github/workflows/validate.yml`
 本地测试：`tests/audit-tests.sh`
@@ -94,8 +97,8 @@ REALITY 官方明确提示：认证失败流量会被转发到 target；若 targ
 
 ## 尚未消除的边界
 
-1. **缺少一次可销毁新 VPS 的端到端系统级验收。** 配置解析不等价于验证 apt、systemd、UFW、ACME、Cloudflare 控制面在所有发行版组合上的真实行为。
-2. **Cloudflare Public Hostname 仍需控制面操作。** Token 只能注册 connector，不能证明 hostname 已映射到 `127.0.0.1:10000`；v4 会把未完成状态标成 pending，而不是成功。
+1. **缺少一次完全干净、可销毁新 VPS 的端到端系统级验收。** `us-gcp` 补足了 GCP、systemd、UFW、ACME 和 Cloudflare 新控制面的真实路径，但旧 ACME 数据恰好证明它不是纯净基线；也不能代表所有 Ubuntu/Debian 版本和云厂商。
+2. **Cloudflare Published application 仍需控制面操作。** Token 只能注册 connector，不能证明 hostname 已映射到 `http://127.0.0.1:10000`；脚本会在摘要中把 CDN 标成“等待外部配置”，而不伪报 CDN 就绪。
 3. **Reality target 会随网络和站点运维变化。** 今天支持 TLS 1.3 不代表永久适合；每次安装会重新探测。
 4. **版本固定意味着需要维护。** 固定版本提高可复现性，但不会自动获得上游安全更新；升级必须复核配置兼容并更新 SHA-256/CI。
 5. **延迟无脚本保证。** v4 的真实出站自测证明协议能转发，不代表客户端侧 RTT 小于 100 ms。

@@ -85,12 +85,12 @@ ZONE=alecyinshis.com
 
 如果已经可以执行 `ssh <SSH_ALIAS>`，跳过本节。
 
-编辑 `~/.ssh/config`，为每台 VPS 使用独立 Host 块：
+编辑 `~/.ssh/config`，为每台 VPS 使用独立 Host 块。`User` 可以是 `root`，也可以是云厂商创建的普通 sudo 用户：
 
 ```sshconfig
 Host <SSH_ALIAS>
     HostName <VPS_IPV4>
-    User root
+    User <ROOT_OR_SUDO_USER>
     Port <SSH_PORT>
     IdentityFile ~/.ssh/id_rsa
     IdentitiesOnly yes
@@ -112,6 +112,17 @@ chmod 644 ~/.ssh/id_rsa.pub
 ```bash
 ssh <SSH_ALIAS> 'printf "ssh-ok\n"; id; uname -a'
 ```
+
+GCP、AWS 等平台通常禁用 root 直接 SSH。若 `id -u` 不是 `0`，必须先确认该用户可免密 sudo：
+
+```bash
+ssh -T <SSH_ALIAS> '
+  id
+  sudo -n true && echo "PASSWORDLESS_SUDO=YES"
+'
+```
+
+后文默认使用更常见的“普通用户 + 免密 sudo”命令；如果 SSH 用户本身就是 root，可以省略相应的 `sudo`。不要为了适配教程而开启 root SSH 或修改现有登录方式。
 
 如果还没有安装公钥：
 
@@ -152,6 +163,15 @@ dig +short AAAA <DIRECT_DOMAIN> @1.1.1.1
 ```
 
 A 记录必须只返回当前 VPS IPv4。没有 IPv6 时，AAAA 应为空。
+
+如果 Mac 正在运行 Clash/Mihomo 的 TUN 或 Fake-IP 模式，`dig` 即使指定 `@1.1.1.1` 也可能返回 `198.18.x.x`。`198.18.0.0/15` 是本地代理使用的测试/Fake-IP 地址，不是 VPS 的真实解析。此时改从 VPS 的独立网络验证：
+
+```bash
+ssh -T <SSH_ALIAS> '
+  dig +short A <DIRECT_DOMAIN> @1.1.1.1
+  dig +short AAAA <DIRECT_DOMAIN> @1.1.1.1
+'
+```
 
 ## 4. Cloudflare 第二步：创建最小权限 DNS API Token
 
@@ -301,15 +321,21 @@ ssh -T <SSH_ALIAS> '
 
 ### 方法 A：从 GitHub main 下载
 
+下面写法兼容普通 sudo 用户，不要求其直接写入 `/root`：
+
 ```bash
 ssh -T <SSH_ALIAS> '
   set -Eeuo pipefail
   curl -fL --retry 3 \
     https://raw.githubusercontent.com/Erwin-lark/vps-proxy-deploy/main/vps-deploy.sh \
-    -o /root/vps-deploy.sh
-  chmod 0700 /root/vps-deploy.sh
-  bash -n /root/vps-deploy.sh
-  head -n 12 /root/vps-deploy.sh
+    -o /tmp/vps-deploy.sh
+  curl -fL --retry 3 \
+    https://raw.githubusercontent.com/Erwin-lark/vps-proxy-deploy/main/SHA256SUMS \
+    -o /tmp/SHA256SUMS
+  (cd /tmp && sha256sum -c SHA256SUMS)
+  bash -n /tmp/vps-deploy.sh
+  sudo install -o root -g root -m 0700 /tmp/vps-deploy.sh /root/vps-deploy.sh
+  sudo sed -n "1,12p" /root/vps-deploy.sh
 '
 ```
 
@@ -320,13 +346,33 @@ ssh -T <SSH_ALIAS> '
 在仓库目录执行：
 
 ```bash
-scp vps-deploy.sh <SSH_ALIAS>:/root/vps-deploy.sh
-ssh -T <SSH_ALIAS> 'chmod 0700 /root/vps-deploy.sh; bash -n /root/vps-deploy.sh'
+shasum -a 256 -c SHA256SUMS
+scp vps-deploy.sh <SSH_ALIAS>:/tmp/vps-deploy.sh
+ssh -T <SSH_ALIAS> '
+  set -Eeuo pipefail
+  bash -n /tmp/vps-deploy.sh
+  sudo install -o root -g root -m 0700 /tmp/vps-deploy.sh /root/vps-deploy.sh
+  sudo bash -n /root/vps-deploy.sh
+'
 ```
 
 ## 8. 首次部署：安全传入两枚 Token
 
 下面命令从 macOS 钥匙串读取两枚 Token，通过 SSH 标准输入传给脚本。Token 不会出现在 `ps` 命令行中；DNS Token 不写入 v4 状态文件，Tunnel Token 写入 VPS 上 `root:root 600` 的 `/etc/cloudflared/token`。
+
+普通 sudo 用户先用无敏感值变量确认 sudo 允许继承指定环境：
+
+```bash
+ssh -T <SSH_ALIAS> '
+  TOKEN_ENV_PROBE=ok
+  export TOKEN_ENV_PROBE
+  sudo --preserve-env=TOKEN_ENV_PROBE \
+    sh -c '\''test "$TOKEN_ENV_PROBE" = ok'\'' &&
+    echo "SUDO_ENV_PASS"
+'
+```
+
+必须看到 `SUDO_ENV_PASS`。若失败，不要把 Token 拼进 SSH、sudo 或 cloudflared 的命令参数；改用 root SSH 会话，或先由管理员为该安装流程配置受限的 sudo 环境继承。
 
 先把占位符替换成当前 VPS 的值：
 
@@ -348,14 +394,15 @@ ssh -T <SSH_ALIAS> 'chmod 0700 /root/vps-deploy.sh; bash -n /root/vps-deploy.sh'
   export CF_DNS_TOKEN_ENV CF_TOKEN_ENV
   export LC_ALL=C.UTF-8 LANG=C.UTF-8
 
-  ACME_MODE_ENV=dns \
-  CDN_DOMAIN_ENV=<CDN_DOMAIN> \
-  COUNTRY_ENV=<COUNTRY> \
-  REALITY_TARGET_ENV=<REALITY_TARGET>:443 \
-  MANAGE_UFW_ENV=1 \
-  bash /root/vps-deploy.sh \
-    <DIRECT_DOMAIN> \
-    <EMAIL>
+  sudo --preserve-env=CF_DNS_TOKEN_ENV,CF_TOKEN_ENV \
+    env ACME_MODE_ENV=dns \
+        CDN_DOMAIN_ENV=<CDN_DOMAIN> \
+        COUNTRY_ENV=<COUNTRY> \
+        REALITY_TARGET_ENV=<REALITY_TARGET>:443 \
+        MANAGE_UFW_ENV=1 \
+        bash /root/vps-deploy.sh \
+          <DIRECT_DOMAIN> \
+          <EMAIL>
 
   unset CF_DNS_TOKEN_ENV CF_TOKEN_ENV
 '
@@ -374,18 +421,21 @@ ssh -T <SSH_ALIAS> 'chmod 0700 /root/vps-deploy.sh; bash -n /root/vps-deploy.sh'
   export CF_DNS_TOKEN_ENV CF_TOKEN_ENV
   export LC_ALL=C.UTF-8 LANG=C.UTF-8
 
-  ACME_MODE_ENV=dns \
-  CDN_DOMAIN_ENV=cdn-jp-bvl.alecyinshis.com \
-  COUNTRY_ENV=JP \
-  REALITY_TARGET_ENV=www.nic.ad.jp:443 \
-  MANAGE_UFW_ENV=1 \
-  bash /root/vps-deploy.sh \
-    jp-bvl.alecyinshis.com \
-    alecyinshi@gmail.com
+  sudo --preserve-env=CF_DNS_TOKEN_ENV,CF_TOKEN_ENV \
+    env ACME_MODE_ENV=dns \
+        CDN_DOMAIN_ENV=cdn-jp-bvl.alecyinshis.com \
+        COUNTRY_ENV=JP \
+        REALITY_TARGET_ENV=www.nic.ad.jp:443 \
+        MANAGE_UFW_ENV=1 \
+        bash /root/vps-deploy.sh \
+          jp-bvl.alecyinshis.com \
+          alecyinshi@gmail.com
 
   unset CF_DNS_TOKEN_ENV CF_TOKEN_ENV
 '
 ```
+
+如果 `<SSH_ALIAS>` 登录后已经是 root，删除上述两处 `sudo --preserve-env=...`，直接执行后面的 `env ... bash /root/vps-deploy.sh` 即可。
 
 首次执行会：
 
@@ -396,6 +446,24 @@ ssh -T <SSH_ALIAS> 'chmod 0700 /root/vps-deploy.sh; bash -n /root/vps-deploy.sh'
 - 启动服务并执行 Reality、Hysteria2 的真实代理出站测试。
 - 启动 cloudflared connector。
 - 如果 Public Hostname 尚未建立，显示“CDN 等待外部配置”，这不是直连协议失败。
+
+安装失败不代表所有改动都已自动回滚。例如已安装的软件包、sysctl/UFW 增量规则和已成功启动的服务可能保留，但脚本不会打印成功摘要。v4.1.3 起会记录当前阶段，并把已生成的凭证暂存为待提交状态：
+
+```text
+/etc/vps-proxy/install-phase
+/etc/vps-proxy/state.pending
+```
+
+两者均应为 `root:root 600`。安全重跑会复用 `state.pending` 中的凭证；全部健康检查通过后，脚本才将它提升为 `state.env` 并删除阶段标记。失败后先保留这些文件和日志，可用以下命令判断停在哪一步：
+
+```bash
+ssh -T <SSH_ALIAS> '
+  sudo cat /etc/vps-proxy/install-phase 2>/dev/null || true
+  sudo stat -c "%U:%G %a %n" \
+    /etc/vps-proxy/state.pending \
+    /etc/vps-proxy/state.env 2>/dev/null || true
+'
+```
 
 如果命令在安装依赖、修改配置或重启服务前需要人工审批，应先审阅完整命令和影响，再执行。
 
@@ -413,9 +481,9 @@ Healthy / Connected
 
 ```bash
 ssh -T <SSH_ALIAS> '
-  systemctl --no-pager --full status cloudflared
-  journalctl -u cloudflared --since "10 minutes ago" --no-pager
-  stat -c "%U:%G %a %n" /etc/cloudflared/token
+  sudo systemctl --no-pager --full status cloudflared
+  sudo journalctl -u cloudflared --since "10 minutes ago" --no-pager
+  sudo stat -c "%U:%G %a %n" /etc/cloudflared/token
 '
 ```
 
@@ -429,7 +497,19 @@ root:root 600 /etc/cloudflared/token
 
 ## 10. 创建 Public Hostname
 
-在 Cloudflare Zero Trust 中打开 `<TUNNEL_NAME>`，进入 Public Hostnames、Published Applications 或 Routes 页面，名称可能随控制台更新略有变化。
+当前 Cloudflare 控制台路径是：
+
+```text
+Cloudflare Dashboard
+  → Networking
+  → Tunnels
+  → <TUNNEL_NAME>
+  → Routes
+  → Add route
+  → Published application
+```
+
+旧版 Zero Trust 控制台可能显示为 `Networks → Tunnels → Public Hostnames`，功能相同。不要选 `Private network`。
 
 新增一条公网主机名：
 
@@ -437,19 +517,27 @@ root:root 600 /etc/cloudflared/token
 Subdomain:     <CDN_DOMAIN> 的主机部分
 Domain:        <ZONE>
 Path:          留空
-Service Type:  HTTP
-Service URL:   127.0.0.1:10000
+Service URL:   http://127.0.0.1:10000
 ```
 
 例如：
 
 ```text
 Hostname:      cdn-jp-bvl.alecyinshis.com
-Service:       HTTP
-URL:           127.0.0.1:10000
+Service URL:   http://127.0.0.1:10000
 ```
 
-保存后检查 Cloudflare DNS：
+新界面把协议和地址合并为一个 `Service URL` 输入框，必须包含 `http://`。如果旧界面分成两项，则选 `Service Type: HTTP`，再填 `URL: 127.0.0.1:10000`。
+
+如果 Cloudflare 账号中有多个 Zone，必须在 `Domain` 下拉框中明确选择 `<ZONE>`。界面默认值可能是另一个域名，只检查 Subdomain 会把路由建到错误的 Zone。
+
+保存后先检查 Tunnel 页面：
+
+- Routes 计数应由 `0` 变为 `1`。
+- 路由列表应显示完整 `<CDN_DOMAIN>`。
+- Service 应显示 `http://127.0.0.1:10000`。
+
+再检查 Cloudflare DNS：
 
 - 应出现 CDN 主机名的 proxied CNAME/Tunnel route。
 - CDN 记录应是橙云代理状态。
@@ -463,7 +551,7 @@ dig +short <CDN_DOMAIN> @1.1.1.1
 curl -I --connect-timeout 10 https://<CDN_DOMAIN>/
 ```
 
-根路径返回 404 并不一定是错误；真正验收使用脚本生成的秘密订阅路径。
+刚保存时 Cloudflare 的 DNS/证书可能需要短暂传播；如果首次出现 TLS 错误，先确认路由、Zone 和自动生成的 proxied CNAME 都正确，然后等待数分钟重试。根路径返回 404 并不一定是错误；真正验收使用脚本生成的秘密订阅路径。
 
 ## 11. Public Hostname 保存后的最终验收
 
@@ -471,7 +559,7 @@ curl -I --connect-timeout 10 https://<CDN_DOMAIN>/
 ssh -T <SSH_ALIAS> '
   set -eu
   export LC_ALL=C.UTF-8 LANG=C.UTF-8
-  bash /root/vps-deploy.sh --check
+  sudo bash /root/vps-deploy.sh --check
 '
 ```
 
@@ -482,6 +570,7 @@ xray：active
 hysteria-server：active
 caddy：active
 cloudflared：active
+fail2ban：active
 VLESS Reality 真实出站自测：通过
 Hysteria2 真实出站自测：通过
 Caddy 本地订阅：通过
@@ -494,9 +583,9 @@ VLESS WebSocket/Cloudflare 真实出站自测：通过
 
 ```bash
 ssh -T <SSH_ALIAS> '
-  ss -H -ltnp "sport = :443 or sport = :10000 or sport = :10001 or sport = :10002"
-  ss -H -lunp "sport = :443"
-  ufw status numbered
+  sudo ss -H -ltnp "sport = :443 or sport = :10000 or sport = :10001 or sport = :10002"
+  sudo ss -H -lunp "sport = :443"
+  sudo ufw status numbered
 '
 ```
 
@@ -526,7 +615,7 @@ Loon： https://<CDN_DOMAIN>/<SUB_TOKEN>/loon.conf
 如果忘记 URL，可在 VPS 本人可见的 root 会话中重新运行：
 
 ```bash
-bash /root/vps-deploy.sh --check
+sudo bash /root/vps-deploy.sh --check
 ```
 
 ## 13. Clash Verge 导入与刷新
@@ -660,9 +749,9 @@ ping -c 20 <TEST_IP>
 检查：
 
 ```bash
-systemctl status cloudflared
-journalctl -u cloudflared --since "10 minutes ago" --no-pager
-stat -c '%U:%G %a %n' /etc/cloudflared/token
+sudo systemctl status cloudflared
+sudo journalctl -u cloudflared --since "10 minutes ago" --no-pager
+sudo stat -c '%U:%G %a %n' /etc/cloudflared/token
 ```
 
 不要因为首次尚未连接就删除 Tunnel。先完成第 8 节部署。
@@ -672,15 +761,14 @@ stat -c '%U:%G %a %n' /etc/cloudflared/token
 核对 Public Hostname：
 
 ```text
-Service type = HTTP
-URL = 127.0.0.1:10000
+Service URL = http://127.0.0.1:10000
 ```
 
 VPS 本地检查：
 
 ```bash
 curl -I http://127.0.0.1:10000/
-systemctl status caddy cloudflared
+sudo systemctl status caddy cloudflared
 ```
 
 不要把 Service URL 设置成 CDN 域名、VPS 公网 IP、HTTPS、10001 或 10002。
@@ -709,16 +797,20 @@ curl -6 --noproxy '*' https://api64.ipify.org
 - Hysteria 日志是否有 Cloudflare API 错误。
 
 ```bash
-journalctl -u hysteria-server --since "30 minutes ago" --no-pager
+sudo journalctl -u hysteria-server --since "30 minutes ago" --no-pager
+sudo namei -l /var/lib/hysteria/acme
+sudo find /var/lib/hysteria/acme -xdev -printf '%u:%g %m %p\n'
 ```
 
 DNS Token 不会写入状态文件，所以每次重写 Hysteria DNS-01 配置都必须重新从钥匙串传入。
 
+如果日志出现 `permission denied`，而上述目录或证书文件属于 `root:root`，通常是以前安装留下的 ACME 数据与当前 `hysteria` 服务用户不兼容。v4.1.3 会自动修正只包含同文件系普通文件/目录的安全目录树属主；如果其中存在符号链接、硬链接、特殊文件或嵌套挂载，脚本会拒绝递归改权并要求先人工审查，避免越界修改其他文件。
+
 ### 16.5 Hysteria2 节点超时，其他节点正常
 
 ```bash
-ss -H -lunp 'sport = :443'
-ufw status numbered
+sudo ss -H -lunp 'sport = :443'
+sudo ufw status numbered
 ```
 
 确认 443/udp 对公网允许。某些 Wi-Fi 会限制 UDP/QUIC；切换蜂窝网络是有价值的对照测试。
@@ -731,16 +823,31 @@ ufw status numbered
 
 这是上游对 WebSocket 传输的弃用提示。当前保留 VW 是为了 Loon CDN 兼容；Mihomo 优先保留 XHTTP。未来 Loon 若支持 XHTTP，或 Xray 真正移除 WebSocket，需要迁移，而不是忽略版本升级测试。
 
+### 16.8 fail2ban 显示 inactive
+
+fail2ban 不参与代理数据面，因此它启动失败不会让四种协议自测伪报失败；但 SSH 防暴力尝试尚未就绪，不应长期忽略：
+
+```bash
+sudo systemctl status fail2ban --no-pager
+sudo journalctl -u fail2ban --since "30 minutes ago" --no-pager
+sudo fail2ban-client status
+sudo fail2ban-client status sshd
+```
+
+修正日志中的原因后执行 `sudo systemctl restart fail2ban`，再运行 `sudo bash /root/vps-deploy.sh --check`。
+
 ## 17. 日常只读检查
 
 ```bash
 ssh -T <SSH_ALIAS> '
-  bash /root/vps-deploy.sh --check
-  systemctl is-active xray hysteria-server caddy cloudflared
-  systemctl is-enabled xray hysteria-server caddy cloudflared
-  ss -H -ltnp "sport = :443 or sport = :10000 or sport = :10001 or sport = :10002"
-  ss -H -lunp "sport = :443"
-  journalctl -u xray -u hysteria-server -u caddy -u cloudflared \
+  sudo bash /root/vps-deploy.sh --check
+  sudo systemctl is-active xray hysteria-server caddy cloudflared
+  sudo systemctl is-enabled xray hysteria-server caddy cloudflared
+  sudo systemctl is-active fail2ban
+  sudo systemctl is-enabled fail2ban
+  sudo ss -H -ltnp "sport = :443 or sport = :10000 or sport = :10001 or sport = :10002"
+  sudo ss -H -lunp "sport = :443"
+  sudo journalctl -u xray -u hysteria-server -u caddy -u cloudflared \
     --since "1 hour ago" --no-pager
 '
 ```
@@ -827,13 +934,14 @@ Cloudflare：
 - [ ] 直连记录灰云。
 - [ ] DNS API Token 只授权目标 Zone 的 DNS Edit。
 - [ ] Tunnel connector Healthy。
-- [ ] CDN Public Hostname 指向 HTTP `127.0.0.1:10000`。
+- [ ] CDN Published application 的 Service URL 是 `http://127.0.0.1:10000`。
 - [ ] CDN DNS 是 proxied Tunnel route，没有旧 A/AAAA。
 
 VPS：
 
 - [ ] `--check` 四协议真实出站全部通过。
-- [ ] 四个 systemd 服务 active 且 enabled。
+- [ ] Xray、Hysteria2、Caddy、cloudflared 四个代理服务 active 且 enabled。
+- [ ] fail2ban active 且 enabled；若为 degraded，已根据日志查明原因。
 - [ ] 443/tcp 和 443/udp 对公网监听。
 - [ ] 10000/10001/10002 只监听 127.0.0.1。
 - [ ] UFW 保留实际 SSH 端口。

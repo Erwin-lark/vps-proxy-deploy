@@ -5,7 +5,7 @@
 set -Eeuo pipefail
 umask 027
 
-SCRIPT_VERSION="4.1.2"
+SCRIPT_VERSION="4.1.3"
 XRAY_VERSION="v26.3.27"
 HYSTERIA_VERSION="app/v2.12.1"
 CADDY_VERSION="v2.11.4"
@@ -13,6 +13,8 @@ CLOUDFLARED_VERSION="2026.7.3"
 
 STATE_DIR="/etc/vps-proxy"
 STATE_FILE="${STATE_DIR}/state.env"
+PENDING_STATE_FILE="${STATE_DIR}/state.pending"
+INSTALL_PHASE_FILE="${STATE_DIR}/install-phase"
 LEGACY_STATE_FILE="${STATE_DIR}/subs.conf"
 SUB_ROOT="/var/lib/subscription"
 TRAFFIC_ROOT="/var/lib/traffic-monitor"
@@ -81,11 +83,13 @@ VPS 代理部署脚本 v4
 
 DNS-01（Cloudflare）：
   ACME_MODE_ENV=dns CF_DNS_TOKEN_ENV='...' \
-    sudo -E bash vps-deploy.sh DOMAIN EMAIL
+    sudo --preserve-env=ACME_MODE_ENV,CF_DNS_TOKEN_ENV \
+      bash vps-deploy.sh DOMAIN EMAIL
 
 启用 Cloudflare Tunnel + XHTTP + WebSocket + HTTPS 订阅：
   CDN_DOMAIN_ENV=cdn.example.com CF_TOKEN_ENV='eyJ...' \
-    sudo -E bash vps-deploy.sh node.example.com EMAIL
+    sudo --preserve-env=CDN_DOMAIN_ENV,CF_TOKEN_ENV \
+      bash vps-deploy.sh node.example.com EMAIL
 
 只读验收：
   sudo bash vps-deploy.sh --check
@@ -164,12 +168,44 @@ state_file_is_safe() {
     (( (8#$mode & 0022) == 0 ))
 }
 
+report_incomplete_install() {
+    local phase="unknown"
+    if state_file_is_safe "$INSTALL_PHASE_FILE"; then
+        phase=$(<"$INSTALL_PHASE_FILE")
+        [[ "$phase" =~ ^[a-z0-9-]{1,48}$ ]] || phase="unknown"
+        warn "检测到上次未完成的安装阶段：${phase}；本次会复用安全状态并继续"
+    fi
+}
+
+mark_install_phase() {
+    local phase=$1 temp_dir phase_file
+    [[ "$phase" =~ ^[a-z0-9-]{1,48}$ ]] || die "内部安装阶段名称无效：$phase"
+    install -d -m 0700 -o root -g root "$STATE_DIR"
+    new_temp_dir
+    temp_dir=$NEW_TEMP_DIR
+    phase_file="$temp_dir/install-phase"
+    printf '%s\n' "$phase" > "$phase_file"
+    install -m 0600 -o root -g root "$phase_file" "$INSTALL_PHASE_FILE"
+}
+
+clear_install_phase() {
+    rm -f -- "$INSTALL_PHASE_FILE"
+}
+
 load_state() {
+    report_incomplete_install
     if [[ -f "$STATE_FILE" ]]; then
         state_file_is_safe "$STATE_FILE" || die "状态文件权限不安全：$STATE_FILE"
         # shellcheck disable=SC1090
         source "$STATE_FILE"
         info "已载入现有 v4 状态"
+        return
+    fi
+    if [[ -f "$PENDING_STATE_FILE" ]]; then
+        state_file_is_safe "$PENDING_STATE_FILE" || die "待提交状态文件权限不安全：$PENDING_STATE_FILE"
+        # shellcheck disable=SC1090
+        source "$PENDING_STATE_FILE"
+        warn "已载入上次未完成安装的待提交状态；凭证不会重新生成"
         return
     fi
     migrate_legacy_state
@@ -622,12 +658,64 @@ install_hysteria_binary() {
     install -m 0755 "$temp_dir/hysteria" /usr/local/bin/hysteria
 }
 
+managed_tree_is_safe() {
+    local root=$1
+    python3 - "$root" <<'PY'
+import os
+import stat
+import sys
+
+root = sys.argv[1]
+try:
+    root_stat = os.lstat(root)
+except OSError:
+    raise SystemExit(1)
+if not stat.S_ISDIR(root_stat.st_mode) or stat.S_ISLNK(root_stat.st_mode):
+    raise SystemExit(1)
+
+root_device = root_stat.st_dev
+for directory, directories, files in os.walk(root, followlinks=False):
+    for name in directories + files:
+        path = os.path.join(directory, name)
+        try:
+            item = os.lstat(path)
+        except OSError:
+            raise SystemExit(1)
+        if item.st_dev != root_device:
+            raise SystemExit(1)
+        if stat.S_ISLNK(item.st_mode):
+            raise SystemExit(1)
+        if stat.S_ISREG(item.st_mode):
+            if item.st_nlink != 1:
+                raise SystemExit(1)
+        elif not stat.S_ISDIR(item.st_mode):
+            raise SystemExit(1)
+PY
+}
+
+normalize_hysteria_acme_ownership() {
+    local acme_root=/var/lib/hysteria/acme mismatched=""
+    [[ ! -L /var/lib/hysteria && ! -L "$acme_root" ]] || \
+        die "Hysteria 数据目录不能是符号链接：$acme_root"
+    install -d -m 0750 -o hysteria -g hysteria /var/lib/hysteria "$acme_root"
+    managed_tree_is_safe "$acme_root" || \
+        die "Hysteria ACME 目录包含链接、特殊文件或跨文件系对象；拒绝自动修改所有权：$acme_root"
+    mismatched=$(find "$acme_root" -xdev \( ! -user hysteria -o ! -group hysteria \) \
+        -print -quit 2>/dev/null || true)
+    if [[ -n "$mismatched" ]]; then
+        warn "检测到 Hysteria ACME 遗留所有权，将在不跟随链接的前提下修复：$mismatched"
+        find "$acme_root" -xdev \( ! -user hysteria -o ! -group hysteria \) \
+            -exec chown --no-dereference hysteria:hysteria {} +
+        info "Hysteria ACME 遗留所有权已修复"
+    fi
+}
+
 ensure_service_users() {
     getent group xray >/dev/null || groupadd --system xray
     id xray >/dev/null 2>&1 || useradd --system --gid xray --home-dir /nonexistent --shell /usr/sbin/nologin xray
     getent group hysteria >/dev/null || groupadd --system hysteria
     id hysteria >/dev/null 2>&1 || useradd --system --gid hysteria --home-dir /var/lib/hysteria --shell /usr/sbin/nologin hysteria
-    install -d -m 0750 -o hysteria -g hysteria /var/lib/hysteria /var/lib/hysteria/acme
+    normalize_hysteria_acme_ownership
     if $ENABLE_CDN; then
         getent group caddy >/dev/null || groupadd --system caddy
         id caddy >/dev/null 2>&1 || useradd --system --gid caddy --home-dir /var/lib/caddy --shell /usr/sbin/nologin caddy
@@ -1148,8 +1236,9 @@ EOF
     systemctl is-active --quiet cloudflared.service || die "cloudflared 未运行"
 }
 
-write_state() {
-    install -d -m 0700 "$STATE_DIR"
+write_state_file() {
+    local destination=$1
+    install -d -m 0700 -o root -g root "$STATE_DIR"
     local temp_dir state
     new_temp_dir
     temp_dir=$NEW_TEMP_DIR
@@ -1175,7 +1264,18 @@ write_state() {
         printf 'STATE_REALITY_PUBKEY=%q\n' "$REALITY_PUBKEY"
         printf 'STATE_REALITY_SHORTID=%q\n' "$REALITY_SHORTID"
     } > "$state"
-    install -m 0600 -o root -g root "$state" "$STATE_FILE"
+    install -m 0600 -o root -g root "$state" "$destination"
+}
+
+write_pending_state() {
+    write_state_file "$PENDING_STATE_FILE"
+}
+
+promote_pending_state() {
+    state_file_is_safe "$PENDING_STATE_FILE" || die "待提交状态缺失或权限不安全：$PENDING_STATE_FILE"
+    mv -f -- "$PENDING_STATE_FILE" "$STATE_FILE"
+    chown root:root "$STATE_FILE"
+    chmod 0600 "$STATE_FILE"
 }
 
 write_subscriptions() {
@@ -1342,6 +1442,7 @@ EOF
 }
 
 setup_fail2ban() {
+    local attempt
     install -d -m 0755 /etc/fail2ban/jail.d
     cat > /etc/fail2ban/jail.d/vps-proxy.local <<EOF
 [sshd]
@@ -1355,11 +1456,19 @@ bantime.increment = true
 bantime.factor = 2
 bantime.maxtime = 1d
 EOF
-    if ! systemctl enable --now fail2ban.service >/dev/null 2>&1; then
-        warn "fail2ban 启动失败；不影响代理，但应检查 journalctl -u fail2ban"
-    elif ! systemctl restart fail2ban.service >/dev/null 2>&1; then
-        warn "fail2ban 重载失败；不影响代理，但应检查 journalctl -u fail2ban"
-    fi
+    systemctl enable fail2ban.service >/dev/null 2>&1 || \
+        warn "fail2ban 无法设为开机启动"
+    for attempt in 1 2 3; do
+        systemctl restart fail2ban.service >/dev/null 2>&1 || true
+        if systemctl is-active --quiet fail2ban.service; then
+            info "fail2ban：active"
+            return
+        fi
+        warn "fail2ban 第 ${attempt}/3 次启动尚未就绪"
+        systemctl reset-failed fail2ban.service >/dev/null 2>&1 || true
+        sleep 1
+    done
+    warn "fail2ban 启动失败；不影响代理，但应检查 journalctl -u fail2ban"
 }
 
 free_local_tcp_port() {
@@ -1570,6 +1679,11 @@ health_check() {
             failed=true
         fi
     fi
+    if systemctl is-active --quiet fail2ban.service; then
+        info "fail2ban：active"
+    else
+        warn "fail2ban：inactive；代理可用，但 SSH 暴力尝试防护未就绪"
+    fi
     XRAY_LOCATION_ASSET=/usr/local/share/xray \
         /usr/local/bin/xray run -test -config /usr/local/etc/xray/config.json >/dev/null || failed=true
     ss -H -ltn "sport = :443" | grep -q . || failed=true
@@ -1614,7 +1728,7 @@ health_check() {
                 CDN_READY=true
             fi
         else
-            warn "Cloudflare HTTPS 订阅尚不可达；请完成 Public Hostname 映射后运行 --check"
+            warn "Cloudflare HTTPS 订阅尚不可达；请完成 Published application 路由后运行 --check"
         fi
     fi
     if $failed; then
@@ -1635,8 +1749,8 @@ print_summary() {
         printf '  WebSocket：%s:443（Cloudflare → http://127.0.0.1:%s）\n' "$CDN_DOMAIN" "$CADDY_ORIGIN_PORT"
         printf '  Clash：https://%s/%s/clash.yaml\n' "$CDN_DOMAIN" "$SUB_TOKEN"
         printf '  Loon：https://%s/%s/loon.conf\n' "$CDN_DOMAIN" "$SUB_TOKEN"
-        printf '\nCloudflare Public Hostname 必须设置为：\n'
-        printf '  %s → HTTP → 127.0.0.1:%s\n' "$CDN_DOMAIN" "$CADDY_ORIGIN_PORT"
+        printf '\nCloudflare Published application 必须设置为：\n'
+        printf '  %s → http://127.0.0.1:%s\n' "$CDN_DOMAIN" "$CADDY_ORIGIN_PORT"
     else
         printf '  Clash 文件：%s/%s/clash.yaml\n' "$SUB_ROOT" "$SUB_TOKEN"
         printf '  Loon 文件：%s/%s/loon.conf\n' "$SUB_ROOT" "$SUB_TOKEN"
@@ -1697,11 +1811,13 @@ main() {
 
     load_state
     configure_inputs
+    mark_install_phase validated
     install_dependencies
     detect_region
     detect_ssh_port
     verify_direct_dns
     preflight_ports
+    mark_install_phase system-changes
     optimize_system
     setup_firewall
 
@@ -1709,13 +1825,15 @@ main() {
     install_hysteria_binary
     ensure_service_users
     ensure_secrets
+    write_pending_state
+    mark_install_phase service-configuration
     probe_reality_target
     write_xray_config
     write_hysteria_config
     install_caddy
-    write_state
     write_subscriptions
     install_traffic_dashboard
+    mark_install_phase tunnel-and-security
     install_cloudflared
     # 流量看板刚写入了新文件，再次统一 Caddy 的只读权限。
     if $ENABLE_CDN; then
@@ -1724,7 +1842,10 @@ main() {
         find "${SUB_ROOT}/${SUB_TOKEN}" -type f -exec chmod 0640 {} +
     fi
     setup_fail2ban
+    mark_install_phase verification
     health_check
+    promote_pending_state
+    clear_install_phase
     print_summary
 }
 

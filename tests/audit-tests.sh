@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# shellcheck disable=SC1091,SC2034,SC2016
+# shellcheck disable=SC1091,SC2034,SC2016,SC2329
 set -Eeuo pipefail
 
 REPO_ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
@@ -59,6 +59,52 @@ cleanup_tests() {
     rm -rf -- "$test_root"
 }
 trap cleanup_tests EXIT
+
+mkdir -p "$test_root/safe-tree"
+printf '%s\n' safe > "$test_root/safe-tree/file"
+managed_tree_is_safe "$test_root/safe-tree" || fail "safe managed tree rejected"
+ln -s /tmp "$test_root/safe-tree/link"
+! managed_tree_is_safe "$test_root/safe-tree" || fail "managed tree symlink accepted"
+rm -f "$test_root/safe-tree/link"
+ln "$test_root/safe-tree/file" "$test_root/safe-tree/hardlink"
+! managed_tree_is_safe "$test_root/safe-tree" || fail "managed tree hard link accepted"
+rm -f "$test_root/safe-tree/hardlink"
+mkfifo "$test_root/safe-tree/fifo"
+! managed_tree_is_safe "$test_root/safe-tree" || fail "managed tree special file accepted"
+rm -f "$test_root/safe-tree/fifo"
+pass "managed-tree ownership repair rejects links and special files"
+
+(
+    STATE_DIR="$test_root/pending-load"
+    STATE_FILE="$STATE_DIR/state.env"
+    PENDING_STATE_FILE="$STATE_DIR/state.pending"
+    INSTALL_PHASE_FILE="$STATE_DIR/install-phase"
+    LEGACY_STATE_FILE="$STATE_DIR/subs.conf"
+    mkdir -p "$STATE_DIR"
+    printf '%s\n' 'STATE_SUB_TOKEN=pending-token' > "$PENDING_STATE_FILE"
+    state_file_is_safe() { [[ "$1" == "$PENDING_STATE_FILE" ]]; }
+    migrate_legacy_state() { fail "pending state unexpectedly fell back to legacy migration"; }
+    unset STATE_SUB_TOKEN
+    load_state >/dev/null 2>&1
+    [[ "$STATE_SUB_TOKEN" == "pending-token" ]] || fail "pending credentials were not reloaded"
+)
+pass "interrupted install reloads pending credentials"
+
+(
+    STATE_DIR="$test_root/pending-promote"
+    STATE_FILE="$STATE_DIR/state.env"
+    PENDING_STATE_FILE="$STATE_DIR/state.pending"
+    mkdir -p "$STATE_DIR"
+    printf '%s\n' 'STATE_SUB_TOKEN=promoted-token' > "$PENDING_STATE_FILE"
+    state_file_is_safe() { [[ "$1" == "$PENDING_STATE_FILE" ]]; }
+    chown() { :; }
+    chmod() { :; }
+    promote_pending_state
+    [[ ! -e "$PENDING_STATE_FILE" ]] || fail "pending state remained after promotion"
+    grep -Fq 'STATE_SUB_TOKEN=promoted-token' "$STATE_FILE" || fail "promoted state content changed"
+)
+pass "verified install atomically promotes pending state"
+
 SUB_ROOT="$test_root/subscription"
 SUB_TOKEN="0123456789abcdef0123456789abcdef0123"
 ENABLE_CDN=true
@@ -112,6 +158,10 @@ assert_contains "$REPO_ROOT/vps-deploy.sh" 'managed_listener "$expected"' "same-
 assert_not_contains "$REPO_ROOT/vps-deploy.sh" 'cloudflared service install "$CF_TOKEN"' "Tunnel token is not passed in a process argument"
 assert_contains "$REPO_ROOT/vps-deploy.sh" 'install -m 0600 -o root -g root "$temp_dir/tunnel-token" /etc/cloudflared/token' "Tunnel token is installed with root-only permissions"
 assert_contains "$REPO_ROOT/vps-deploy.sh" 'tunnel run --token-file /etc/cloudflared/token' "cloudflared reads its token from the protected file"
+assert_contains "$REPO_ROOT/vps-deploy.sh" 'chown --no-dereference hysteria:hysteria' "Hysteria ACME residue is repaired without following links"
+assert_contains "$REPO_ROOT/vps-deploy.sh" 'write_state_file "$PENDING_STATE_FILE"' "credentials are staged before service configuration"
+assert_contains "$REPO_ROOT/vps-deploy.sh" 'mv -f -- "$PENDING_STATE_FILE" "$STATE_FILE"' "pending state is promoted only after verification"
+assert_contains "$REPO_ROOT/vps-deploy.sh" 'fail2ban：inactive' "health check reports degraded SSH abuse protection"
 assert_not_contains "$REPO_ROOT/vps-deploy.sh" 'PROVIDER_ENV' "service-provider input removed"
 assert_not_contains "$REPO_ROOT/vps-deploy.sh" 'STATE_PROVIDER' "service-provider state removed"
 
@@ -370,16 +420,19 @@ install_xray_binary() { record_main_call xray_binary; }
 install_hysteria_binary() { record_main_call hysteria_binary; }
 ensure_service_users() { record_main_call users; }
 ensure_secrets() { record_main_call secrets; }
+mark_install_phase() { record_main_call "phase-$1"; }
+write_pending_state() { record_main_call pending_state; }
 probe_reality_target() { record_main_call target; }
 write_xray_config() { record_main_call xray_config; }
 write_hysteria_config() { record_main_call hysteria_config; }
 install_caddy() { record_main_call caddy; }
-write_state() { record_main_call write_state; }
 write_subscriptions() { record_main_call subscriptions; }
 install_traffic_dashboard() { record_main_call traffic; }
 install_cloudflared() { record_main_call cloudflared; }
 setup_fail2ban() { record_main_call fail2ban; }
 health_check() { record_main_call health; }
+promote_pending_state() { record_main_call promote_state; }
+clear_install_phase() { record_main_call clear_phase; }
 print_summary() { record_main_call summary; }
 MODE=install
 NON_INTERACTIVE=false
@@ -389,9 +442,14 @@ ACME_MODE_ENV=http
 CDN_DOMAIN_ENV=
 unset STATE_DOMAIN STATE_EMAIL STATE_ACME_MODE STATE_CDN_DOMAIN
 main node.example.com admin@example.com
-[[ " ${main_calls[*]} " == *' health summary '* ]] || fail "non-interactive main did not reach successful handoff"
-[[ " ${main_calls[*]} " == *' platform state inputs dependencies '* ]] || \
+[[ " ${main_calls[*]} " == *' health promote_state clear_phase summary '* ]] || \
+    fail "non-interactive main did not reach successful handoff"
+[[ " ${main_calls[*]} " == *' platform state inputs phase-validated dependencies '* ]] || \
     fail "input validation did not run before package installation"
+[[ " ${main_calls[*]} " == *' secrets pending_state phase-service-configuration target '* ]] || \
+    fail "generated credentials were not staged before service configuration"
+[[ " ${main_calls[*]} " == *' phase-verification health promote_state clear_phase summary '* ]] || \
+    fail "pending state was not promoted after successful verification"
 pass "non-interactive main reaches health check and summary without prompting"
 
 printf '\n%d audit tests passed\n' "$pass_count"
