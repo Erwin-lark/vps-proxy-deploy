@@ -44,6 +44,7 @@ jobs:
 
       - name: Bash and ShellCheck
         run: |
+          sha256sum -c SHA256SUMS
           bash -n vps-deploy.sh tests/audit-tests.sh
           shellcheck -S style vps-deploy.sh tests/audit-tests.sh
 
