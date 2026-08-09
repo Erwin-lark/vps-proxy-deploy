@@ -2,6 +2,82 @@
 
 > 每次改动的操作日志、优化理由、技术决策记录
 > 仓库：https://github.com/Erwin-lark/vps-proxy-deploy
+> 注意：v3.1.1 及更早记录是历史当时的判断，不代表已经过当前上游文档或实测验证。已发现的错误结论见 `AUDIT.md`。
+
+---
+
+## v4.1.1 — 首装失败安全、Token 防泄露与移动端重连 (2026-08-09)
+
+### 修复与优化
+
+- 把状态读取和全部输入校验移到依赖安装之前；无效域名、邮箱、Token 或环境变量不会先触发 `apt-get`。
+- 依赖齐全的重跑跳过 `apt-get update/install`，降低维护窗口、上游仓库故障和无关软件变化带来的风险。
+- 全新 Tunnel 不再执行带 Token 参数的 `cloudflared service install`；改用 `root:root 600` 的 `/etc/cloudflared/token` 和受管 systemd 单元，避免 Token 短暂出现在进程命令行。
+- 已有 cloudflared 服务仍不自动覆盖；若检测到单元疑似内嵌 `eyJ...` Token，只给出不泄露 Token 的迁移警告。
+- `--check` 不再只检查 10000/10001/10002 是否有人监听，而是强制确认三个 origin 都绑定 `127.0.0.1`。
+- v4.0 状态缺少 WebSocket 字段时，`--check` 现在给出明确迁移说明，不再只显示 Bash 空变量错误。
+- Hysteria 固定升级到 v2.12.1；上游版本修复了移动设备休眠或空闲后持有旧 QUIC 连接时重连缓慢的问题。
+
+### 文档
+
+- 新增 `MANUAL.md` 超详细手册，覆盖全新 VPS、SSH、DNS、最小权限 DNS Token、Tunnel Token 钥匙串保存、首次 connector、Public Hostname、四协议验收、Clash/Loon、统一测速、更新、备份、Token 轮换和故障排查。
+- 明确区分直连域名、Tunnel 名称、CDN Public Hostname；Public Hostname 始终回源 HTTP `127.0.0.1:10000`。
+
+### 验证边界
+
+- 本地回归断言增加到 40 项，并把 CI 的 Hysteria 验证器同步到 v2.12.1 与官方 SHA-256。
+- v4.1.0 已在现有 `jp-bvl` 完成四协议真实出站；v4.1.1 在重新部署到该服务器前仍需单独展示更新命令、说明重启影响并获得确认。
+
+## v4.1.0 — Loon 兼容的 VLESS CDN 节点 (2026-08-09)
+
+### 新增
+
+- 在现有 Cloudflare Tunnel 与 CDN 域名上增加 VLESS WebSocket + TLS 节点，无需新增 Public Hostname 或公网防火墙端口。
+- Caddy 按独立秘密路径分流：XHTTP 回源 `127.0.0.1:10001`，WebSocket 回源 `127.0.0.1:10002`；两个入口都只监听回环地址。
+- Loon 订阅新增官方支持语法的 `VW` 节点；Mihomo 订阅同时保留 Reality、Hysteria2、XHTTP 和 WebSocket。
+- WebSocket UUID 与路径写入 v4 状态并在重跑时复用；旧 VMess UUID/路径只作为通过校验后的迁移候选。
+- `--check` 对 XHTTP 和 WebSocket 分别执行经 Cloudflare 的真实代理出站测试，任何一个失败都不会把 CDN 标为就绪。
+
+### 验证
+
+- 官方 Xray 同时解析 Reality、XHTTP、WebSocket 服务端配置及相应自测客户端配置。
+- 使用真实 Caddy 与 Xray 进程分别完成 XHTTP、WebSocket 经同一 Caddy origin 的端到端模拟。
+- Mihomo 解析四节点订阅；Loon 配置使用其官方 VLESS WebSocket 字段顺序与参数名。
+- Bash、ShellCheck、`git diff --check` 和 37 项本地回归断言全部通过。
+- 在现有 Ubuntu 22.04 `jp-bvl` 上完成 v4.0 → v4.1 重跑；Reality、Hysteria2、XHTTP、WebSocket 均通过真实代理出站复检，四项 systemd 服务保持 active。
+- 服务器监听核对：Caddy/XHTTP/WebSocket 分别只绑定 `127.0.0.1:10000/10001/10002`，没有增加公网入口。
+
+### 设计边界
+
+- WebSocket 用于补足 Loon 的 CDN 节点兼容性；它不会改善客户端到 Cloudflare 或 VPS 的物理/运营商路由时延。
+- Mihomo 继续保留 XHTTP。WebSocket 的 HTTP/1.1 Upgrade 特征更明显，不作为所有客户端的唯一 CDN 传输。
+
+## v4.0.0 — 可移植性与失败安全重构 (2026-08-08)
+
+### 关键修复
+
+- 改用严格错误处理，关键下载、配置解析、服务启动或真实代理出站失败时不再报“完成”。
+- Xray 使用专用用户及 `root:xray 640` 配置，修复首次安装和重启后的读取权限回归。
+- 修复 Reality 重跑公钥推导，并持久化、校验公私钥。
+- Hysteria DNS-01 改用官方 `cloudflare_api_token`；HTTP-01 永久保留 80/tcp 以便续期。
+- Cloudflare 链路改为 `CDN:443 → Tunnel → Caddy 127.0.0.1:10000 → Xray 127.0.0.1:10001`，并使用 XHTTP `packet-up` 兼容模式。
+- Caddy 站点仅绑定回环地址，但允许 Cloudflare 保留的 Host；修复订阅父目录无法穿越的权限。
+- 不再重置 UFW、停止未知服务、杀端口进程、修改 SSH 登录方式或删除用户。
+- 已有节点更新后若 Xray、Hysteria 或 Caddy 无法启动，自动恢复本次覆盖前的配置。
+- 所有输入白名单校验；新状态文件安全转义，旧状态只按已知字段迁移。
+- Xray、Hysteria、Caddy 和 cloudflared 均固定版本与每架构 SHA-256。
+
+### 验证
+
+- Bash 语法、ShellCheck style 级别和 `git diff --check`。
+- 官方 Xray 服务端/客户端配置解析、Hysteria 实际启动解析、Mihomo 配置解析。
+- Caddy 配置解析及带 Cloudflare Host 的真实 HTTP 请求。
+- 31 项本地回归断言；CI 使用固定验证器重复执行。
+
+### 未宣称为已完成的事项
+
+- 尚未在一台可销毁的全新 VPS 上完成首装、重跑、重启和三协议真实客户端验收。
+- `<100 ms` 取决于客户端到机房的路由与物理距离，不是安装脚本可保证的属性。
 
 ---
 

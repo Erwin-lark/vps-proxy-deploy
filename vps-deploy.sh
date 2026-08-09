@@ -1,925 +1,877 @@
-#!/bin/bash
-#==============================================================================
-#  VPS 一键部署脚本 — 三协议代理 + 流量监控 + 订阅生成
-#
-#  ██ 交互式安装:                                 ██
-#  curl -sLo vps-deploy.sh https://tinyurl.com/vps-proxy-deploy && sudo bash vps-deploy.sh
-#
-#  ██ 一键安装（跳过交互，直接传参）:                ██
-#  curl -sLo vps-deploy.sh https://tinyurl.com/vps-proxy-deploy && sudo bash vps-deploy.sh my.example.com PROVIDER
-#
-#  ██ 断点续传：中断后重新运行，已安装的服务自动跳过 ██
-#
-#  支持: Ubuntu 20.04/22.04/24.04, Debian 11/12
-#  需要: root 权限, 至少 1GB 内存
-#==============================================================================
-# set -e 已移除：非致命错误不中断部署，用 || true 和 || warn 处理
+#!/usr/bin/env bash
+# VPS proxy deployment v4
+# VLESS Reality + Hysteria 2, with optional VLESS XHTTP and WebSocket through Cloudflare Tunnel.
 
-#==============================================================================
-#  ██████  交互式配置 ██████
-#==============================================================================
-setup_config() {
-    echo -e "${CYAN}"
-    echo "  ╔══════════════════════════════════════╗"
-    echo "  ║   VPS 三协议代理一键部署脚本            ║"
-    echo "  ║   VLESS Reality + Hysteria2 + VLESS XHTTP ║"
-    echo "  ╚══════════════════════════════════════╝"
-    echo -e "${NC}"
+set -Eeuo pipefail
+umask 027
 
-    # ═══════════════════════════════════════════════════
-    # 前置检查：在所有操作之前确认 Cloudflare 已就绪
-    # ═══════════════════════════════════════════════════
-    if [ -n "$1" ] && [ -n "$2" ]; then
-        info "非交互模式，跳过前置确认"
-    else
-        echo ""
-        echo -e "${RED}╔════════════════════════════════════════════════════╗${NC}"
-        echo -e "${RED}║  ⚠️  运行脚本前，必须完成以下 Cloudflare 操作：  ║${NC}"
-        echo -e "${RED}╠════════════════════════════════════════════════════╣${NC}"
-        echo -e "${RED}║                                                    ║${NC}"
-        echo -e "${RED}║  ① 添加 DNS A 记录 (灰云 DNS only)                ║${NC}"
-        echo -e "${RED}║     你的域名 → VPS IP                              ║${NC}"
-        echo -e "${RED}║                                                    ║${NC}"
-        echo -e "${RED}║  ② 创建 Cloudflare Tunnel 并复制 Token             ║${NC}"
-        echo -e "${RED}║     eyJ 开头的长字符串                             ║${NC}"
-        echo -e "${RED}║                                                    ║${NC}"
-        echo -e "${RED}║  ③ 配置 Tunnel Public Hostname (必须手动!)         ║${NC}"
-        echo -e "${RED}║     cdn-xxx.你的域名 → HTTP → localhost:10001      ║${NC}"
-        echo -e "${RED}║                                                    ║${NC}"
-        echo -e "${RED}╠════════════════════════════════════════════════════╣${NC}"
-        echo -e "${RED}║  ⚠️ 第③步不做 = CDN 节点永远不会通!               ║${NC}"
-        echo -e "${RED}╚════════════════════════════════════════════════════╝${NC}"
-        echo ""
+SCRIPT_VERSION="4.1.1"
+XRAY_VERSION="v26.3.27"
+HYSTERIA_VERSION="app/v2.12.1"
+CADDY_VERSION="v2.11.4"
+CLOUDFLARED_VERSION="2026.7.3"
 
-        while true; do
-            echo -e "${GREEN}以上 3 项是否已完成? [y/N]:${NC}"
-            read -p "  > " CF_READY
-            case "$CF_READY" in
-                y|Y|yes|YES)
-                    info "已确认，开始部署"
-                    break
-                    ;;
-                n|N|no|NO|"")
-                    echo ""
-                    echo -e "${CYAN}请完成以下操作后回来：${NC}"
-                    echo ""
-                    echo "  🌐 https://dash.cloudflare.com/ → DNS → Add record"
-                    echo "     A 记录: 你的域名 → VPS IP，灰云"
-                    echo ""
-                    echo "  🔗 https://one.dash.cloudflare.com/ → Networks → Tunnels"
-                    echo "     Create a tunnel → 复制 Token (eyJ...)"
-                    echo ""
-                    echo "  ⚙️  Tunnel → Configure → Public Hostname → Add"
-                    echo "     Subdomain: cdn-你的域名"
-                    echo "     URL 填: localhost:10001"
-                    echo ""
-                    echo -e "${GREEN}完成后输入 y，或输入 q 退出${NC}"
-                    read -p "  > " RETRY
-                    if [ "$RETRY" = "q" ] || [ "$RETRY" = "Q" ]; then
-                        echo "已退出"
-                        exit 0
-                    fi
-                    ;;
-                *) echo "请输入 y 或 n" ;;
-            esac
-        done
-    fi
+STATE_DIR="/etc/vps-proxy"
+STATE_FILE="${STATE_DIR}/state.env"
+LEGACY_STATE_FILE="${STATE_DIR}/subs.conf"
+SUB_ROOT="/var/lib/subscription"
+TRAFFIC_ROOT="/var/lib/traffic-monitor"
+BACKUP_ROOT="/var/backups/vps-proxy"
 
-    # ═══════════════════════════════════════════════════
-    # 端口预检：检测即将占用的端口是否已被使用
-    # ═══════════════════════════════════════════════════
-    echo ""
-    echo -e "${YELLOW}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-    echo -e "${YELLOW}  端口预检：脚本将占用以下端口${NC}"
-    echo -e "${YELLOW}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-    echo ""
+REALITY_PORT=443
+HY2_PORT=443
+CADDY_ORIGIN_PORT=10000
+XHTTP_PORT=10001
+WS_PORT=10002
 
-    PORT_CONFLICTS=""
-    _check_port() {
-        local port=$1 svc=$2 lifetime=$3
-        local proc
-        proc=$(ss -tlnp 2>/dev/null | grep ":${port} " | awk '{print $NF}' | sed 's/users:(("//;s/",.*//' | head -1)
-        if [ -n "$proc" ]; then
-            echo -e "  ${RED}⚠ 端口 ${port}${NC} (${svc}) ${YELLOW}[${lifetime}]${NC} ← 已被占用: ${proc}"
-            PORT_CONFLICTS="${PORT_CONFLICTS}${port} "
-        else
-            echo -e "  ${GREEN}✓ 端口 ${port}${NC} (${svc}) ${CYAN}[${lifetime}]${NC} ← 空闲"
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+NC='\033[0m'
+
+info() { printf '%b[INFO]%b %s\n' "$GREEN" "$NC" "$*"; }
+warn() { printf '%b[WARN]%b %s\n' "$YELLOW" "$NC" "$*" >&2; }
+err() { printf '%b[ERR ]%b %s\n' "$RED" "$NC" "$*" >&2; }
+die() { err "$*"; exit 1; }
+
+TEMP_DIRS=()
+CHILD_PIDS=()
+
+cleanup() {
+    local pid temp_dir
+    for pid in "${CHILD_PIDS[@]:-}"; do
+        if [[ "$pid" =~ ^[0-9]+$ ]] && kill -0 "$pid" 2>/dev/null; then
+            kill "$pid" 2>/dev/null || true
+            wait "$pid" 2>/dev/null || true
         fi
-    }
-
-    _check_port 443  "VLESS Reality + Hysteria2"        "永久占用"
-    _check_port 80   "Hysteria ACME 证书验证"            "临时 → 获证后恢复"
-    _check_port 8443 "Caddy 订阅门户"                    "永久占用"
-    _check_port 10001 "VLESS XHTTP (内部)"               "永久占用"
-
-    if [ -n "$PORT_CONFLICTS" ]; then
-        echo ""
-        echo -e "${YELLOW}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-        echo -e "${YELLOW}  ⚠  端口冲突说明：${NC}"
-        echo -e "${YELLOW}  [永久占用] 端口将被脚本长期占用，原服务不会恢复${NC}"
-        echo -e "${YELLOW}  [临时→恢复] 仅安装期间暂停，证书完成后自动恢复${NC}"
-        echo -e "${YELLOW}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-    else
-        echo ""
-        echo -e "${GREEN}  所有端口空闲，无冲突 ✅${NC}"
-    fi
-    echo ""
-
-    # 非交互模式跳过确认；交互模式等待回车
-    if [ -z "$1" ] || [ -z "$2" ]; then
-        read -p "  继续部署? [回车继续 / q 退出]: " PORT_OK
-        if [ "$PORT_OK" = "q" ] || [ "$PORT_OK" = "Q" ]; then
-            echo "已退出"
-            exit 0
+    done
+    for temp_dir in "${TEMP_DIRS[@]:-}"; do
+        if [[ "$temp_dir" == /tmp/vps-proxy.* ]] && [[ -d "$temp_dir" ]]; then
+            rm -rf -- "$temp_dir"
         fi
-    fi
+    done
+}
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+trap 'exit 129' HUP
 
-    # 域名（四种方式：环境变量 > 命令行 > 交互输入 > stdin）
-    if [ -n "${DOMAIN_ENV:-}" ]; then
-        DOMAIN="$DOMAIN_ENV"
-    elif [ -n "$1" ]; then
-        DOMAIN="$1"
-    else
-        while true; do
-            echo ""
-            echo -e "${GREEN}请输入域名:${NC}"
-            read -p "  > " DOMAIN
-            DOMAIN=$(echo "$DOMAIN" | sed 's|^https\?://||; s|/\+$||')
-            # 验证域名格式（防止注入 + 确保配置合法）
-            if [ -n "$DOMAIN" ] && echo "$DOMAIN" | grep -qE '^([a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?\.)+[a-zA-Z]{2,}$'; then
-                break
-            fi
-            [ -z "$DOMAIN" ] && echo -e "${RED}域名不能为空，请重新输入${NC}"
-            [ -n "$DOMAIN" ] && echo -e "${RED}域名格式无效（如 example.com），请重新输入${NC}"
-            DOMAIN=""
-        done
-    fi
-
-    # 服务商代码 — 自动从域名提取
-    AUTO_PROVIDER=""
-    if [ -n "$DOMAIN" ]; then
-        # 取域名第一段，尝试从地区-服务商格式提取（如 jp-bvl → BVL）
-        FIRST_LABEL=$(echo "$DOMAIN" | cut -d. -f1)
-        if echo "$FIRST_LABEL" | grep -q '-'; then
-            # 格式: us-gcp → 取 gcp
-            AUTO_PROVIDER=$(echo "$FIRST_LABEL" | cut -d- -f2- | tr '[:lower:]' '[:upper:]')
-        fi
-    fi
-
-    if [ -n "${PROVIDER_ENV:-}" ]; then
-        PROVIDER="$PROVIDER_ENV"
-    elif [ -n "$2" ]; then
-        PROVIDER="$2"
-    elif [ -n "$AUTO_PROVIDER" ]; then
-        echo ""
-        echo -e "${GREEN}检测到服务商代码: ${CYAN}${AUTO_PROVIDER}${NC}"
-        read -p "  确认? [回车确认 / n 重新输入]: " CONFIRM_PROV
-        if [ "$CONFIRM_PROV" = "n" ] || [ "$CONFIRM_PROV" = "N" ]; then
-            while true; do
-                read -p "  请输入服务商代码: " PROVIDER
-                [ -n "$PROVIDER" ] && break
-            done
-            PROVIDER=$(echo "$PROVIDER" | tr '[:lower:]' '[:upper:]')
-        else
-            PROVIDER="$AUTO_PROVIDER"
-        fi
-    else
-        while true; do
-            echo ""
-            echo -e "${GREEN}请输入服务商代码 (如 BVL / HZ / AWS):${NC}"
-            read -p "  > " PROVIDER
-            [ -n "$PROVIDER" ] && break
-            echo -e "${RED}服务商代码不能为空，请重新输入${NC}"
-        done
-    fi
-    [ -z "$PROVIDER" ] && PROVIDER="VPS"
-
-    echo ""
-    info "域名:     ${DOMAIN}"
-    info "服务商:   ${PROVIDER}"
-
-    # SSH 端口
-    SSH_OLD_PORT=$(grep -oP '^Port\s+\K\d+' /etc/ssh/sshd_config 2>/dev/null || echo "22")
-    [ -z "$SSH_OLD_PORT" ] && SSH_OLD_PORT=22
-
-    # 非交互模式不询问，保持当前端口
-    if [ -n "$1" ] && [ -n "$2" ]; then
-        SSH_PORT="$SSH_OLD_PORT"
-        info "SSH 端口: ${SSH_PORT} (保持当前)"
-    else
-        echo ""
-        if [ "$SSH_OLD_PORT" = "22" ]; then
-            echo -e "${YELLOW}当前 SSH 端口: 22（默认端口，容易被暴力扫描）${NC}"
-            echo -e "${GREEN}建议修改为随机高端口以提高安全性，是否修改? [y/N]:${NC}"
-            read -p "  > " CHANGE_SSH
-            if [ "$CHANGE_SSH" = "y" ] || [ "$CHANGE_SSH" = "Y" ]; then
-                SSH_PORT=$((22000 + RANDOM % 2000))
-                info "SSH 将在部署最后阶段修改为 ${SSH_PORT}"
-            else
-                SSH_PORT=22
-                info "SSH 端口保持 22"
-            fi
-        else
-            SSH_PORT="$SSH_OLD_PORT"
-            info "SSH 端口: ${SSH_PORT} (保持当前)"
-        fi
-    fi
-
-    # Email（环境变量 > 命令行参数 > 交互输入）
-    EMAIL="${EMAIL_ENV:-${3:-}}"
-    if [ -z "$1" ] || [ -z "$2" ]; then
-        while true; do
-            echo ""
-            echo -e "${GREEN}Let's Encrypt 通知邮箱 (必须有效):${NC}"
-            [ -n "$EMAIL" ] && echo -e "  回车使用默认: ${CYAN}${EMAIL}${NC}"
-            read -p "  > " EMAIL_INPUT
-            [ -n "$EMAIL_INPUT" ] && EMAIL="$EMAIL_INPUT"
-            # 验证邮箱包含 @ 和 .
-            if echo "$EMAIL" | grep -q '@.*\.'; then
-                break
-            fi
-            echo -e "${RED}邮箱格式无效，必须包含 @ 和域名 (如 admin@gmail.com)${NC}"
-            EMAIL=""
-        done
-    fi
-    # 非交互模式：用环境变量或安全默认值
-    [ -z "$EMAIL" ] && EMAIL="${EMAIL_ENV:-admin@${DOMAIN#*.}}"
-    # 如果域名解析失败导致的无效默认，最后兜底
-    echo "$EMAIL" | grep -q '@.*\.' || EMAIL="admin@vps.local"
-
-    # 其余固定配置
-    REALITY_PORT=443
-    HY2_PORT=443
-    CADDY_PORT=8443
-    XHTTP_PORT=10001
-    CLIENT_COUNT=3
-    CLIENT_NAMES=("mac" "windows" "iphone")
-    PROTO_VR="VR"
-    PROTO_H2="H2"
-    PROTO_VX="VX"
-    REALITY_TARGET="www.nic.ad.jp:443"
-    HY2_MASQUERADE_URL="https://www.nic.ad.jp/"
-    ACME_MODE="${ACME_MODE_ENV:-http}"          # http 或 dns（dns 需要 CF_DNS_TOKEN）
-    CF_DNS_TOKEN="${CF_DNS_TOKEN_ENV:-}"        # DNS-01 模式需要的 Cloudflare API Token
-    SUB_TOKEN=$(tr -dc 'a-f0-9' < /dev/urandom | head -c 36)
+unregister_child_pid() {
+    local target=$1 pid remaining=()
+    for pid in "${CHILD_PIDS[@]:-}"; do
+        [[ "$pid" == "$target" ]] || remaining+=("$pid")
+    done
+    CHILD_PIDS=("${remaining[@]}")
 }
 
-#==============================================================================
-#  ██████ 自动检测：国家 + 国旗 + 伪装目标 ██████
-#==============================================================================
-auto_detect_region() {
-    step "自动检测地区"
+new_temp_dir() {
+    NEW_TEMP_DIR=$(mktemp -d /tmp/vps-proxy.XXXXXX)
+    TEMP_DIRS+=("$NEW_TEMP_DIR")
+}
 
-    # 方法1: ip-api.com（免费，不需要 key）
-    local geo
-    geo=$(curl -s --max-time 5 http://ip-api.com/json/ 2>/dev/null || true)
+usage() {
+    cat <<'EOF'
+VPS 代理部署脚本 v4
 
-    if [ -n "$geo" ] && echo "$geo" | grep -q '"countryCode"'; then
-        COUNTRY=$(echo "$geo" | python3 -c "import sys,json; print(json.load(sys.stdin).get('countryCode','XX'))" 2>/dev/null || echo "XX")
+交互安装：
+  sudo bash vps-deploy.sh
+
+非交互安装：
+  sudo bash vps-deploy.sh DOMAIN PROVIDER EMAIL
+
+DNS-01（Cloudflare）：
+  ACME_MODE_ENV=dns CF_DNS_TOKEN_ENV='...' \
+    sudo -E bash vps-deploy.sh DOMAIN PROVIDER EMAIL
+
+启用 Cloudflare Tunnel + XHTTP + WebSocket + HTTPS 订阅：
+  CDN_DOMAIN_ENV=cdn.example.com CF_TOKEN_ENV='eyJ...' \
+    sudo -E bash vps-deploy.sh node.example.com PROVIDER EMAIL
+
+只读验收：
+  sudo bash vps-deploy.sh --check
+
+可选环境变量：
+  DOMAIN_ENV, PROVIDER_ENV, EMAIL_ENV, COUNTRY_ENV, REALITY_TARGET_ENV
+  ACME_MODE_ENV=http|dns, CF_DNS_TOKEN_ENV
+  CDN_DOMAIN_ENV, CF_TOKEN_ENV
+  MANAGE_UFW_ENV=0|1, SKIP_DNS_CHECK_ENV=0|1
+EOF
+}
+
+MODE="install"
+ARG_DOMAIN=""
+ARG_PROVIDER=""
+ARG_EMAIL=""
+NON_INTERACTIVE=false
+
+parse_args() {
+    if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
+        usage
+        exit 0
     fi
+    if [[ "${1:-}" == "--check" ]]; then
+        MODE="check"
+        shift
+    fi
+    [[ $# -le 3 ]] || die "参数过多；使用 --help 查看用法"
+    ARG_DOMAIN="${1:-}"
+    ARG_PROVIDER="${2:-}"
+    ARG_EMAIL="${3:-}"
+    if [[ -n "$ARG_DOMAIN" || -n "${DOMAIN_ENV:-}" ]]; then
+        NON_INTERACTIVE=true
+    fi
+}
 
-    # 方法2: 如果 ip-api 失败，用 ifconfig 推断
-    if [ -z "$COUNTRY" ] || [ "$COUNTRY" = "XX" ]; then
-        local ip=$(curl -s4 --max-time 5 ifconfig.me 2>/dev/null || true)
-        if [ -n "$ip" ]; then
-            geo=$(curl -s --max-time 5 "http://ip-api.com/json/$ip" 2>/dev/null || true)
-            COUNTRY=$(echo "$geo" | python3 -c "import sys,json; print(json.load(sys.stdin).get('countryCode','XX'))" 2>/dev/null || echo "XX")
+require_platform() {
+    [[ $(id -u) -eq 0 ]] || die "请使用 root 运行：sudo bash $0"
+    [[ -r /etc/os-release ]] || die "无法读取 /etc/os-release"
+    # shellcheck disable=SC1091
+    . /etc/os-release
+    case "${ID:-}" in
+        ubuntu|debian) ;;
+        *) die "仅支持使用 systemd 的 Ubuntu/Debian；当前为 ${ID:-unknown}" ;;
+    esac
+    command -v apt-get >/dev/null || die "缺少 apt-get"
+    command -v systemctl >/dev/null || die "缺少 systemd/systemctl"
+    [[ $(ps -p 1 -o comm=) == "systemd" ]] || die "PID 1 不是 systemd；不支持容器内直接部署"
+    info "系统：${PRETTY_NAME:-$ID} / $(uname -m)"
+}
+
+install_dependencies() {
+    local command missing=()
+    for command in update-ca-certificates curl unzip openssl timeout sha256sum tar \
+        ip ss dig python3 cron ufw modprobe useradd groupadd getent \
+        fail2ban-client vnstat vnstati; do
+        command -v "$command" >/dev/null 2>&1 || missing+=("$command")
+    done
+    if (( ${#missing[@]} == 0 )); then
+        info "基础依赖已齐全，跳过 apt 更新"
+        return
+    fi
+    info "安装缺失的基础依赖：${missing[*]}"
+    export DEBIAN_FRONTEND=noninteractive
+    apt-get update -qq
+    apt-get install -y -qq \
+        ca-certificates curl unzip openssl coreutils tar iproute2 dnsutils \
+        python3 cron ufw kmod passwd fail2ban vnstat vnstati >/dev/null
+}
+
+state_file_is_safe() {
+    local path=$1 owner mode
+    [[ -f "$path" ]] || return 1
+    owner=$(stat -c '%U' "$path" 2>/dev/null || true)
+    mode=$(stat -c '%a' "$path" 2>/dev/null || true)
+    [[ "$owner" == "root" ]] || return 1
+    [[ "$mode" =~ ^[0-7]?[0-7][0-7]$ ]] || return 1
+    (( (8#$mode & 0022) == 0 ))
+}
+
+load_state() {
+    if [[ -f "$STATE_FILE" ]]; then
+        state_file_is_safe "$STATE_FILE" || die "状态文件权限不安全：$STATE_FILE"
+        # shellcheck disable=SC1090
+        source "$STATE_FILE"
+        info "已载入现有 v4 状态"
+        return
+    fi
+    migrate_legacy_state
+}
+
+legacy_value() {
+    local key=$1 value
+    value=$(sed -n "s/^${key}=\"\(.*\)\"$/\1/p" "$LEGACY_STATE_FILE" 2>/dev/null | tail -n 1)
+    printf '%s\n' "$value"
+}
+
+migrate_legacy_state() {
+    [[ -f "$LEGACY_STATE_FILE" ]] || return 0
+    state_file_is_safe "$LEGACY_STATE_FILE" || {
+        warn "旧状态文件权限不安全，拒绝载入：$LEGACY_STATE_FILE"
+        return 0
+    }
+    warn "检测到 v3 状态；只迁移经过格式验证的密钥，不 source 旧文件"
+    local value
+    value=$(legacy_value VL_UUIDS_0)
+    valid_uuid "$value" && STATE_VR_CLASH_UUID="$value"
+    value=$(legacy_value VL_UUIDS_2)
+    valid_uuid "$value" && STATE_VR_LOON_UUID="$value"
+    value=$(legacy_value HY2_PASS)
+    [[ "$value" =~ ^[A-Za-z0-9._~-]{16,128}$ ]] && STATE_HY2_PASS="$value"
+    value=$(legacy_value XHTTP_UUID)
+    valid_uuid "$value" && STATE_XHTTP_UUID="$value"
+    value=$(legacy_value XHTTP_PATH)
+    valid_xhttp_path "$value" && STATE_XHTTP_PATH="$value"
+    value=$(legacy_value VMESS_UUID)
+    valid_uuid "$value" && STATE_WS_UUID="$value"
+    value=$(legacy_value VMESS_WS_PATH)
+    valid_ws_path "$value" && STATE_WS_PATH="$value"
+    value=$(legacy_value SUB_TOKEN)
+    [[ "$value" =~ ^[a-f0-9]{24,64}$ ]] && STATE_SUB_TOKEN="$value"
+    value=$(legacy_value VL_PUBKEY)
+    [[ "$value" =~ ^[A-Za-z0-9_-]{40,64}$ ]] && STATE_REALITY_PUBKEY="$value"
+    value=$(legacy_value VL_SHORTID)
+    valid_short_id "$value" && STATE_REALITY_SHORTID="$value"
+
+    if [[ -r /usr/local/etc/xray/config.json ]]; then
+        value=$(python3 - <<'PY' 2>/dev/null || true
+import json
+with open('/usr/local/etc/xray/config.json', encoding='utf-8') as f:
+    config = json.load(f)
+for inbound in config.get('inbounds', []):
+    if inbound.get('tag') == 'vless-reality':
+        print(inbound.get('streamSettings', {}).get('realitySettings', {}).get('privateKey', ''))
+        break
+PY
+)
+        [[ "$value" =~ ^[A-Za-z0-9_-]{40,64}$ ]] && STATE_REALITY_PRIVKEY="$value"
+    fi
+}
+
+normalize_domain() {
+    local value=$1
+    value=${value#http://}
+    value=${value#https://}
+    value=${value%/}
+    printf '%s' "$value" | tr '[:upper:]' '[:lower:]'
+}
+
+valid_domain() {
+    [[ "$1" =~ ^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$ ]]
+}
+
+valid_email() {
+    [[ "$1" =~ ^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,63}$ ]]
+}
+
+valid_uuid() {
+    [[ "$1" =~ ^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$ ]]
+}
+
+valid_xhttp_path() {
+    [[ "$1" =~ ^/[A-Za-z0-9_-]{4,96}$ ]]
+}
+
+valid_ws_path() {
+    [[ "$1" =~ ^/[A-Za-z0-9_-]{4,96}$ ]]
+}
+
+valid_short_id() {
+    [[ "$1" =~ ^([a-fA-F0-9]{2}){1,8}$ ]]
+}
+
+prompt_value() {
+    local prompt=$1 default=${2:-} value
+    if [[ -n "$default" ]]; then
+        read -r -p "${prompt} [${default}]: " value
+        printf '%s' "${value:-$default}"
+    else
+        read -r -p "${prompt}: " value
+        printf '%s' "$value"
+    fi
+}
+
+configure_inputs() {
+    DOMAIN=$(normalize_domain "${DOMAIN_ENV:-${ARG_DOMAIN:-${STATE_DOMAIN:-}}}")
+    PROVIDER="${PROVIDER_ENV:-${ARG_PROVIDER:-${STATE_PROVIDER:-}}}"
+    EMAIL="${EMAIL_ENV:-${ARG_EMAIL:-${STATE_EMAIL:-}}}"
+    ACME_MODE="${ACME_MODE_ENV:-${STATE_ACME_MODE:-http}}"
+    CF_DNS_TOKEN="${CF_DNS_TOKEN_ENV:-}"
+    CDN_DOMAIN=$(normalize_domain "${CDN_DOMAIN_ENV:-${STATE_CDN_DOMAIN:-}}")
+    CF_TOKEN="${CF_TOKEN_ENV:-}"
+    MANAGE_UFW="${MANAGE_UFW_ENV:-1}"
+    SKIP_DNS_CHECK="${SKIP_DNS_CHECK_ENV:-0}"
+
+    if ! $NON_INTERACTIVE; then
+        while ! valid_domain "$DOMAIN"; do
+            DOMAIN=$(normalize_domain "$(prompt_value '直连节点域名（DNS only）' "$DOMAIN")")
+        done
+        PROVIDER=$(prompt_value "服务商代码" "${PROVIDER:-VPS}")
+        while ! valid_email "$EMAIL"; do
+            EMAIL=$(prompt_value "Let's Encrypt 联系邮箱" "$EMAIL")
+        done
+        ACME_MODE=$(prompt_value "ACME 模式 http/dns" "$ACME_MODE")
+        if [[ "$ACME_MODE" == "dns" && -z "$CF_DNS_TOKEN" ]]; then
+            read -r -s -p "Cloudflare DNS API Token: " CF_DNS_TOKEN
+            printf '\n'
+        fi
+        if [[ -z "$CDN_DOMAIN" ]]; then
+            CDN_DOMAIN=$(normalize_domain "$(prompt_value 'Cloudflare CDN 域名（留空禁用 CDN 节点/在线订阅）' '')")
+        fi
+        if [[ -n "$CDN_DOMAIN" && -z "$CF_TOKEN" ]] && ! systemctl cat cloudflared.service >/dev/null 2>&1; then
+            read -r -s -p "Cloudflare Tunnel Token（eyJ...）: " CF_TOKEN
+            printf '\n'
         fi
     fi
 
-    # 国家码 → 国旗 emoji (ISO 3166-1 alpha-2 → Unicode Regional Indicator)
-    FLAG=$(python3 -c "
+    valid_domain "$DOMAIN" || die "域名格式无效：$DOMAIN"
+    PROVIDER=$(printf '%s' "$PROVIDER" | tr '[:lower:]' '[:upper:]')
+    [[ "$PROVIDER" =~ ^[A-Z0-9][A-Z0-9_-]{0,15}$ ]] || die "服务商代码仅允许 1-16 位字母、数字、_、-"
+    valid_email "$EMAIL" || die "必须提供有效邮箱；非交互用第三个参数或 EMAIL_ENV"
+    [[ "$ACME_MODE" == "http" || "$ACME_MODE" == "dns" ]] || die "ACME_MODE_ENV 只能是 http 或 dns"
+    [[ "$MANAGE_UFW" == "0" || "$MANAGE_UFW" == "1" ]] || die "MANAGE_UFW_ENV 只能是 0 或 1"
+    [[ "$SKIP_DNS_CHECK" == "0" || "$SKIP_DNS_CHECK" == "1" ]] || die "SKIP_DNS_CHECK_ENV 只能是 0 或 1"
+    if [[ "$ACME_MODE" == "dns" ]]; then
+        [[ -n "$CF_DNS_TOKEN" ]] || die "DNS-01 需要 CF_DNS_TOKEN_ENV"
+        [[ "$CF_DNS_TOKEN" =~ ^[A-Za-z0-9_-]{20,128}$ ]] || die "Cloudflare DNS Token 格式异常"
+    fi
+    if [[ -n "$CDN_DOMAIN" ]]; then
+        valid_domain "$CDN_DOMAIN" || die "CDN_DOMAIN_ENV 格式无效：$CDN_DOMAIN"
+        [[ "$CDN_DOMAIN" != "$DOMAIN" ]] || die "CDN 域名必须与直连域名不同"
+        ENABLE_CDN=true
+        if ! systemctl cat cloudflared.service >/dev/null 2>&1; then
+            [[ -n "$CF_TOKEN" ]] || die "新装 CDN 需要 CF_TOKEN_ENV"
+        fi
+    else
+        ENABLE_CDN=false
+    fi
+    if [[ -n "$CF_TOKEN" ]]; then
+        CF_TOKEN=$(grep -oE 'eyJ[A-Za-z0-9_+/=-]+' <<<"$CF_TOKEN" | head -n 1 || true)
+        [[ -n "$CF_TOKEN" ]] || die "Cloudflare Tunnel Token 格式无效"
+    fi
+    info "直连域名：${DOMAIN}；服务商：${PROVIDER}；ACME：${ACME_MODE}；CDN：${ENABLE_CDN}"
+}
+
+detect_region() {
+    COUNTRY="${COUNTRY_ENV:-${STATE_COUNTRY:-}}"
+    if [[ -z "$COUNTRY" ]]; then
+        COUNTRY=$(curl -fsS --noproxy '*' --max-time 8 https://www.cloudflare.com/cdn-cgi/trace 2>/dev/null |
+            awk -F= '$1 == "loc" {print $2; exit}' || true)
+    fi
+    COUNTRY=$(printf '%s' "$COUNTRY" | tr '[:lower:]' '[:upper:]')
+    [[ "$COUNTRY" =~ ^[A-Z]{2}$ ]] || COUNTRY="XX"
+    FLAG=$(python3 - "$COUNTRY" <<'PY'
 import sys
-code = '${COUNTRY}'.upper()
-if len(code) == 2 and code.isalpha():
-    flag = chr(0x1F1E6 + ord(code[0]) - ord('A')) + chr(0x1F1E6 + ord(code[1]) - ord('A'))
-    print(flag)
+code = sys.argv[1]
+if len(code) == 2 and code.isalpha() and code != 'XX':
+    print(''.join(chr(0x1F1E6 + ord(c) - ord('A')) for c in code))
 else:
     print('🏳️')
-" 2>/dev/null || echo "🏳️")
-
+PY
+)
     NODE_PREFIX="${FLAG} ${COUNTRY} ${PROVIDER}"
 
-    # 根据地区自动选 Reality 伪装目标
-    case "$COUNTRY" in
-        JP) REALITY_TARGET="www.nic.ad.jp:443"
-            HY2_MASQUERADE_URL="https://www.nic.ad.jp/" ;;
-        HK) REALITY_TARGET="www.hk01.com:443"
-            HY2_MASQUERADE_URL="https://www.hk01.com/" ;;
-        SG) REALITY_TARGET="www.channelnewsasia.com:443"
-            HY2_MASQUERADE_URL="https://www.channelnewsasia.com/" ;;
-        US) REALITY_TARGET="www.bing.com:443"
-            HY2_MASQUERADE_URL="https://www.bing.com/" ;;
-        KR) REALITY_TARGET="www.naver.com:443"
-            HY2_MASQUERADE_URL="https://www.naver.com/" ;;
-        DE) REALITY_TARGET="www.spiegel.de:443"
-            HY2_MASQUERADE_URL="https://www.spiegel.de/" ;;
-        GB) REALITY_TARGET="www.bbc.com:443"
-            HY2_MASQUERADE_URL="https://www.bbc.com/" ;;
-        *)  REALITY_TARGET="www.bing.com:443"
-            HY2_MASQUERADE_URL="https://www.bing.com/" ;;
-    esac
-
-    info "国家: $COUNTRY | 国旗: $FLAG | 伪装: ${REALITY_TARGET%:*}"
-    info "节点前缀: $NODE_PREFIX"
+    REALITY_TARGET="${REALITY_TARGET_ENV:-${STATE_REALITY_TARGET:-}}"
+    if [[ -z "$REALITY_TARGET" ]]; then
+        case "$COUNTRY" in
+            JP) REALITY_TARGET="www.nic.ad.jp:443" ;;
+            HK) REALITY_TARGET="www.hku.hk:443" ;;
+            SG) REALITY_TARGET="www.nus.edu.sg:443" ;;
+            US) REALITY_TARGET="www.cisa.gov:443" ;;
+            KR) REALITY_TARGET="www.snu.ac.kr:443" ;;
+            DE) REALITY_TARGET="www.bund.de:443" ;;
+            GB) REALITY_TARGET="www.gov.uk:443" ;;
+            *) die "无法为国家 ${COUNTRY} 安全地自动选择 Reality target；请设置 REALITY_TARGET_ENV=host:443" ;;
+        esac
+    fi
+    [[ "$REALITY_TARGET" == *:* ]] || REALITY_TARGET="${REALITY_TARGET}:443"
+    local target_host target_port
+    target_host=${REALITY_TARGET%:*}
+    target_port=${REALITY_TARGET##*:}
+    target_host=$(printf '%s' "$target_host" | tr '[:upper:]' '[:lower:]')
+    valid_domain "$target_host" || die "REALITY_TARGET_ENV 主机名无效"
+    if [[ ! "$target_port" =~ ^[0-9]{1,5}$ ]] || \
+        (( 10#$target_port < 1 || 10#$target_port > 65535 )); then
+        die "REALITY_TARGET_ENV 端口无效"
+    fi
+    REALITY_TARGET="${target_host}:${target_port}"
+    REALITY_SNI=${REALITY_TARGET%:*}
+    HY2_MASQUERADE_URL="https://${REALITY_SNI}/"
+    info "地区：${COUNTRY}；Reality target：${REALITY_TARGET}"
 }
 
-#==============================================================================
-#  ██████ 颜色输出 ██████
-#==============================================================================
-RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'
-BLUE='\033[0;34m'; CYAN='\033[0;36m'; NC='\033[0m'
-info()  { echo -e "${GREEN}[INFO]${NC}  $*"; }
-warn()  { echo -e "${YELLOW}[WARN]${NC}  $*"; }
-err()   { echo -e "${RED}[ERR]${NC}   $*"; }
-step()  { STEP=$((STEP + 1)); echo -e "\n${CYAN}==== [$STEP/$TOTAL] $* ====${NC}"; }
+detect_ssh_port() {
+    SSH_PORT=""
+    # 当前 SSH 会话的服务端端口最可靠，也能覆盖 systemd socket activation。
+    if [[ -n "${SSH_CONNECTION:-}" ]]; then
+        SSH_PORT=$(awk '{print $4}' <<<"$SSH_CONNECTION")
+    fi
+    if [[ -z "$SSH_PORT" ]] && command -v sshd >/dev/null 2>&1; then
+        SSH_PORT=$(sshd -T 2>/dev/null | awk '$1 == "port" {print $2; exit}' || true)
+    fi
+    if [[ ! "$SSH_PORT" =~ ^[0-9]{1,5}$ ]] || (( 10#$SSH_PORT < 1 || 10#$SSH_PORT > 65535 )); then
+        SSH_PORT=22
+    fi
+    info "SSH 实际端口：${SSH_PORT}（脚本不会修改 SSH 配置）"
+}
 
-# 临时释放端口（保存占用者信息，稍后自动恢复）
-KILLED_PORTS=""
-STOPPED_SERVICES=""
+verify_direct_dns() {
+    [[ "$SKIP_DNS_CHECK" == "1" ]] && {
+        XRAY_LISTEN=${STATE_XRAY_LISTEN:-0.0.0.0}
+        [[ "$XRAY_LISTEN" == "::" ]] && XRAY_TEST_ADDRESS="::1" || XRAY_TEST_ADDRESS="127.0.0.1"
+        warn "已按 SKIP_DNS_CHECK_ENV=1 跳过 DNS 验证"
+        return
+    }
+    local public_v4 public_v6 a_records aaaa_records a_status aaaa_status bindv6only
+    public_v4=$(curl -4 -fsS --noproxy '*' --max-time 8 https://api.ipify.org 2>/dev/null || true)
+    public_v6=$(curl -6 -fsS --noproxy '*' --max-time 8 https://api64.ipify.org 2>/dev/null || true)
+    a_records=$(dig +short A "$DOMAIN" @1.1.1.1 2>/dev/null | sed '/^$/d' || true)
+    aaaa_records=$(dig +short AAAA "$DOMAIN" @1.1.1.1 2>/dev/null | sed '/^$/d' || true)
+    a_status=$(dns_record_status 4 "$public_v4" "$a_records")
+    aaaa_status=$(dns_record_status 6 "$public_v6" "$aaaa_records")
+    if [[ "$a_status" == "absent" && "$aaaa_status" == "absent" ]]; then
+        die "$DOMAIN 没有可用的 A/AAAA 记录"
+    fi
+    if [[ "$a_status" == "mismatch" || "$aaaa_status" == "mismatch" ]]; then
+        err "公共 DNS 未指向本机，或记录开启了 Cloudflare 橙云"
+        err "本机 IPv4=${public_v4:-无}；A=${a_records//$'\n'/,}"
+        err "本机 IPv6=${public_v6:-无}；AAAA=${aaaa_records//$'\n'/,}"
+        die "请把 $DOMAIN 设置为 DNS only 并指向本机后重跑"
+    fi
 
-_kill_port() {
-    local port=$1 label=$2 permanent=${3:-false}
-    local pids
-    pids=$(fuser ${port}/tcp 2>/dev/null | tr -d ' ')
-    if [ -z "$pids" ]; then
+    bindv6only=$(cat /proc/sys/net/ipv6/bindv6only 2>/dev/null || printf '1')
+    if [[ "$a_status" == "match" && "$aaaa_status" == "match" && "$bindv6only" == "0" ]]; then
+        XRAY_LISTEN="::"
+        XRAY_TEST_ADDRESS="127.0.0.1"
+    elif [[ "$a_status" == "match" ]]; then
+        XRAY_LISTEN="0.0.0.0"
+        XRAY_TEST_ADDRESS="127.0.0.1"
+        if [[ "$aaaa_status" == "match" ]]; then
+            warn "net.ipv6.bindv6only=1；Reality 本次仅监听 IPv4，避免双栈端口冲突"
+        fi
+    else
+        XRAY_LISTEN="::"
+        XRAY_TEST_ADDRESS="::1"
+    fi
+    info "公共 DNS 与本机地址一致（DNS only）"
+}
+
+dns_record_status() {
+    local family=$1 public_ip=$2 records=$3
+    python3 - "$family" "$public_ip" "$records" <<'PY'
+import ipaddress
+import sys
+
+family = int(sys.argv[1])
+public = sys.argv[2]
+records = []
+for value in sys.argv[3].splitlines():
+    try:
+        address = ipaddress.ip_address(value.rstrip('.'))
+    except ValueError:
+        continue
+    if address.version == family:
+        records.append(address)
+
+if not records:
+    print('absent')
+    raise SystemExit
+try:
+    expected = ipaddress.ip_address(public)
+except ValueError:
+    print('mismatch')
+    raise SystemExit
+print('match' if all(address == expected for address in records) else 'mismatch')
+PY
+}
+
+listener_conflict() {
+    local protocol=$1 port=$2 expected=$3 label=$4 output flag
+    if [[ "$protocol" == "tcp" ]]; then
+        flag="-ltnp"
+    else
+        flag="-lunp"
+    fi
+    output=$(ss -H "$flag" "sport = :$port" 2>/dev/null || true)
+    [[ -n "$output" ]] || return 0
+    if grep -qi "$expected" <<<"$output" && managed_listener "$expected"; then
+        info "$label $protocol/$port 已由本脚本服务占用（重跑）"
         return 0
     fi
-
-    # 逐个 PID 找出所属 systemd 服务，记录并临时停止
-    for pid in $pids; do
-        local svc
-        svc=$(ps -p $pid -o pid=,comm= 2>/dev/null | awk '{print $2}')
-        # 尝试找到 systemd 服务名
-        local unit
-        unit=$(systemctl status $pid 2>/dev/null | head -1 | grep -oP '● \K[^ ]+' | sed 's/\.service$//')
-        if [ -n "$unit" ] && systemctl is-active --quiet "$unit" 2>/dev/null; then
-            systemctl stop "$unit" 2>/dev/null || true
-            if ! $permanent; then
-                STOPPED_SERVICES="${STOPPED_SERVICES}${unit} "
-                KILLED_PORTS="${KILLED_PORTS}  ${YELLOW}端口 ${port}${NC} → 暂停 ${unit} (${label}临时需要) → ${GREEN}稍后自动恢复${NC}\n"
-            else
-                KILLED_PORTS="${KILLED_PORTS}  ${RED}端口 ${port}${NC} → 已停止 ${unit} (${label}永久占用)${NC}\n"
-            fi
-        else
-            fuser -k ${port}/tcp 2>/dev/null || true
-            KILLED_PORTS="${KILLED_PORTS}  ${RED}端口 ${port}${NC} → 进程 ${svc:-未知} (${label}需要) → ${YELLOW}无法自动恢复${NC}\n"
-        fi
-    done
-    sleep 1
+    err "$label $protocol/$port 已被其他进程占用：$output"
+    return 1
 }
 
-# 恢复被临时暂停的服务
-_restore_ports() {
-    for unit in $STOPPED_SERVICES; do
-        systemctl start "$unit" 2>/dev/null && info "已恢复 ${unit}" || warn "恢复 ${unit} 失败"
-    done
-    STOPPED_SERVICES=""
-}
-
-# 注册退出信号处理器（防止中途断线导致端口永久丢失）
-trap '_restore_ports' INT TERM
-
-#==============================================================================
-#  ██████ 系统检测 ██████
-#==============================================================================
-check_system() {
-    step "系统检测"
-    [ "$(id -u)" -ne 0 ] && err "请用 root 运行: sudo bash $0" && exit 1
-
-    # 确保 python3 可用（后续 auto_detect_region 等需要）
-    if ! command -v python3 >/dev/null 2>&1; then
-        apt-get update -qq > /dev/null 2>&1
-        apt-get install -y -qq python3 > /dev/null 2>&1 || warn "python3 安装失败，部分功能退化"
+managed_listener() {
+    local service_name=$1 unit=""
+    if state_file_is_safe "$STATE_FILE" || state_file_is_safe "$LEGACY_STATE_FILE"; then
+        return 0
     fi
-
-    if [ -f /etc/os-release ]; then
-        . /etc/os-release
-        info "系统: $NAME $VERSION_ID"
-        case "$ID" in
-            ubuntu|debian) ;;
-            *) err "不支持的系统: $ID（仅支持 Ubuntu/Debian）" ; exit 1 ;;
-        esac
-    else
-        err "无法检测系统版本" && exit 1
-    fi
-
-    TOTAL_MEM=$(awk '/MemTotal/ {printf "%d", $2/1024}' /proc/meminfo)
-    info "内存: ${TOTAL_MEM}MB"
-    [ "$TOTAL_MEM" -lt 900 ] && warn "内存不足 1GB，部分服务可能不稳定"
-
-    info "系统检测通过"
+    case "$service_name" in
+        xray) unit=/etc/systemd/system/xray.service ;;
+        hysteria) unit=/etc/systemd/system/hysteria-server.service ;;
+        caddy) unit=/etc/systemd/system/caddy.service ;;
+        *) return 1 ;;
+    esac
+    [[ -f "$unit" ]] && grep -Fq '# Managed by vps-deploy.sh v4' "$unit"
 }
 
-#==============================================================================
-#  ██████ 系统优化 ██████
-#==============================================================================
+preflight_ports() {
+    local failed=false
+    listener_conflict tcp 443 xray "VLESS Reality" || failed=true
+    listener_conflict udp 443 hysteria "Hysteria2" || failed=true
+    if [[ "$ACME_MODE" == "http" ]]; then
+        listener_conflict tcp 80 hysteria "ACME HTTP-01/续期" || failed=true
+    fi
+    if $ENABLE_CDN; then
+        listener_conflict tcp "$CADDY_ORIGIN_PORT" caddy "Caddy 本地入口" || failed=true
+        listener_conflict tcp "$XHTTP_PORT" xray "XHTTP 本地入口" || failed=true
+        listener_conflict tcp "$WS_PORT" xray "WebSocket 本地入口" || failed=true
+    fi
+    if $failed; then
+        die "端口冲突不会被自动停止或杀进程；请先手动处理"
+    fi
+}
+
 optimize_system() {
-    step "系统优化"
-
-    local SYSCTL_FILE=/etc/sysctl.d/99-vps-proxy.conf
-
-    # 幂等写入：先移除旧文件，避免重复追加
-    rm -f "$SYSCTL_FILE"
-
-    # 启用 BBR
+    info "写入保守的网络参数"
+    local bbr_lines=""
     modprobe tcp_bbr 2>/dev/null || true
-    if grep -qw bbr /proc/sys/net/ipv4/tcp_available_congestion_control; then
-        cat >> "$SYSCTL_FILE" << EOF
-# BBR 拥塞控制
-net.core.default_qdisc = fq
-net.ipv4.tcp_congestion_control = bbr
-EOF
-        info "BBR 已启用"
-    else
-        warn "BBR 不可用，跳过"
+    if grep -qw bbr /proc/sys/net/ipv4/tcp_available_congestion_control 2>/dev/null; then
+        bbr_lines=$'net.core.default_qdisc = fq\nnet.ipv4.tcp_congestion_control = bbr'
     fi
-
-    # TCP 优化
-    cat >> "$SYSCTL_FILE" << EOF
-# TCP Fast Open（双向）
-net.ipv4.tcp_fastopen = 3
-# 小包即时推送（降低交互延迟）
-net.ipv4.tcp_notsent_lowat = 16384
-# 空闲连接不降速
-net.ipv4.tcp_slow_start_after_idle = 0
-# TCP 缓冲区（适配高延迟跨境链路）
+    cat > /etc/sysctl.d/99-vps-proxy.conf <<EOF
+# Managed by vps-deploy.sh ${SCRIPT_VERSION}
+${bbr_lines}
+net.core.rmem_max = 33554432
+net.core.wmem_max = 33554432
 net.ipv4.tcp_rmem = 4096 131072 16777216
-net.ipv4.tcp_wmem = 4096 16384 4194304
-# TCP keepalive（死连接快速回收）
+net.ipv4.tcp_wmem = 4096 131072 16777216
+net.ipv4.tcp_fastopen = 3
+net.ipv4.tcp_slow_start_after_idle = 0
 net.ipv4.tcp_keepalive_time = 600
 net.ipv4.tcp_keepalive_intvl = 60
 net.ipv4.tcp_keepalive_probes = 3
-# 减少 swap（代理服务器不应 swap）
 vm.swappiness = 10
 EOF
-
-    sysctl --system > /dev/null 2>&1
-    info "内核参数已优化: BBR TFO=3 keepalive=600s rmem=16M swappiness=10"
-
-    # journald 日志大小限制
-    mkdir -p /etc/systemd/journald.conf.d
-    cat > /etc/systemd/journald.conf.d/99-limit.conf << EOF
-[Journal]
-SystemMaxUse=100M
-EOF
-    systemctl restart systemd-journald > /dev/null 2>&1 || true
-    info "日志限额: journald 100M"
+    if ! sysctl -p /etc/sysctl.d/99-vps-proxy.conf >/dev/null; then
+        warn "部分 sysctl 参数不受当前内核支持；代理仍可运行"
+    fi
 }
 
-#==============================================================================
-#  ██████ 安装依赖 ██████
-#==============================================================================
-install_deps() {
-    step "安装依赖"
-    export DEBIAN_FRONTEND=noninteractive
-    apt-get update -qq
-    apt-get install -y -qq curl wget unzip openssl cron ufw \
-        python3 locales iputils-ping gnupg psmisc > /dev/null 2>&1
-
-    # locale
-    locale-gen en_US.UTF-8 > /dev/null 2>&1 || true
-    update-locale LANG=en_US.UTF-8 > /dev/null 2>&1 || true
-
-    info "依赖安装完成"
-}
-
-#==============================================================================
-#  ██████ 防火墙 ██████
-#==============================================================================
 setup_firewall() {
-    step "防火墙"
-
-    # 首次安装做 reset；重跑时幂等添加缺失规则
-    if ! ufw status | grep -q "SSH" 2>/dev/null; then
-        ufw --force reset > /dev/null 2>&1
-        ufw default deny incoming > /dev/null
-        ufw default allow outgoing > /dev/null
+    if [[ "$MANAGE_UFW" == "0" ]]; then
+        warn "MANAGE_UFW_ENV=0：未修改主机防火墙；请自行开放 ${SSH_PORT}/tcp、443/tcp、443/udp"
+        [[ "$ACME_MODE" == "http" ]] && warn "HTTP-01 续期还需要永久允许 80/tcp"
+        return
     fi
-
-    # 同时放行新旧 SSH 端口，防止 SSH 切换中途锁死
-    ufw allow "$SSH_OLD_PORT/tcp" comment "SSH (current)" > /dev/null 2>&1
-    if [ "$SSH_PORT" != "$SSH_OLD_PORT" ]; then
-        ufw allow "$SSH_PORT/tcp" comment "SSH (new)" > /dev/null 2>&1
+    info "增量配置 UFW（不 reset、不删除既有规则）"
+    ufw allow "${SSH_PORT}/tcp" comment 'vps-proxy SSH' >/dev/null
+    ufw allow 443/tcp comment 'vps-proxy Reality' >/dev/null
+    ufw allow 443/udp comment 'vps-proxy Hysteria2' >/dev/null
+    if [[ "$ACME_MODE" == "http" ]]; then
+        # Hysteria 自行续证，挑战发生时间不可预知，因此 80/tcp 必须保留。
+        ufw allow 80/tcp comment 'vps-proxy ACME renewal' >/dev/null
     fi
-    ufw allow "$REALITY_PORT/tcp" comment "VLESS Reality" > /dev/null
-    ufw allow "$HY2_PORT/udp" comment "Hysteria2" > /dev/null
-    ufw allow "$CADDY_PORT/tcp" comment "HTTPS Subscription" > /dev/null
-
-    ufw --force enable > /dev/null 2>&1
-    info "防火墙已配置 (SSH:${SSH_OLD_PORT}→${SSH_PORT} Reality:${REALITY_PORT}/tcp Hy2:${HY2_PORT}/udp Caddy:${CADDY_PORT})"
+    ufw --force enable >/dev/null
 }
 
-#==============================================================================
-#  ██████ 生成密钥和 UUID ██████
-#==============================================================================
-generate_keys() {
-    # 不调用 step()，由 main() 统一管理步骤计数
-
-    # VLESS XHTTP CDN 备用 UUID
-    XHTTP_UUID=$(cat /proc/sys/kernel/random/uuid)
-    XHTTP_PATH="/$(echo "$XHTTP_UUID" | cut -d- -f1)-xhttp"
-
-    # 客户端 VLESS UUID
-    VL_UUIDS=()
-    for i in $(seq 1 $CLIENT_COUNT); do
-        VL_UUIDS+=($(cat /proc/sys/kernel/random/uuid))
-    done
-
-    # Hysteria2 密码
-    HY2_PASS=$(openssl rand -hex 24)
-
-    info "密钥生成完成 (${CLIENT_COUNT} VLESS Reality + 1 VLESS XHTTP)"
+sha256_verify() {
+    local file=$1 expected=$2 actual
+    actual=$(sha256sum "$file" | awk '{print $1}')
+    [[ "$actual" == "$expected" ]] || die "SHA-256 校验失败：$file"
 }
 
-#==============================================================================
-#  ██████ 安装 Xray (VLESS Reality + VLESS XHTTP) ██████
-#==============================================================================
-install_xray() {
-    step "安装 Xray"
-
-    # 安装（官方脚本 + 直链兜底）
-    local xray_ok=false
-    bash -c "$(curl -sL --retry 3 --max-time 60 https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install \
-        --version latest > /dev/null 2>&1 && xray_ok=true
-    if ! $xray_ok; then
-        warn "官方脚本安装失败，尝试直接下载..."
-        ARCH=$(uname -m)
-        [ "$ARCH" = "x86_64" ] && ARCH="64"
-        [ "$ARCH" = "aarch64" ] && ARCH="arm64-v8a"
-        curl -sL --retry 3 --max-time 120 -o /tmp/xray.zip \
-            "https://github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-${ARCH}.zip"
-        if [ -s /tmp/xray.zip ] && file /tmp/xray.zip 2>/dev/null | grep -q "Zip archive"; then
-            unzip -o /tmp/xray.zip -d /usr/local/bin/ xray 2>/dev/null || true
-            chmod +x /usr/local/bin/xray 2>/dev/null
-            mkdir -p /usr/local/etc/xray
-            rm -f /tmp/xray.zip
-            [ -x /usr/local/bin/xray ] && xray_ok=true
-        fi
-        rm -f /tmp/xray.zip
-    fi
-
-    if ! $xray_ok; then
-        err "Xray 安装失败！请检查网络连接（GitHub 可达性）"
-        err "如果在中国大陆，请先配置代理后重试"
-        return 1
-    fi
-
-    # Reality 密钥
-    REALITY_KEYPAIR=$(/usr/local/bin/xray x25519 2>/dev/null)
-    REALITY_PRIVKEY=$(echo "$REALITY_KEYPAIR" | grep "Private" | awk '{print $NF}')
-    REALITY_PUBKEY=$(echo "$REALITY_KEYPAIR" | grep "Public" | awk '{print $NF}')
-    REALITY_SHORTID=$(openssl rand -hex 8)
-
-    # 构建客户端列表 JSON
-    CLIENT_JSON=""
-    for i in $(seq 0 $((CLIENT_COUNT - 1))); do
-        [ -n "$CLIENT_JSON" ] && CLIENT_JSON+=","
-        CLIENT_JSON+="{\"id\":\"${VL_UUIDS[$i]}\",\"flow\":\"xtls-rprx-vision\",\"email\":\"${CLIENT_NAMES[$i]}\"}"
-    done
-
-    # 若官方脚本未创建 systemd，手动创建
-    if [ ! -f /etc/systemd/system/xray.service ]; then
-        cat > /etc/systemd/system/xray.service << SVCEOF
-[Unit]
-Description=Xray Service
-After=network.target
-[Service]
-Type=simple
-ExecStart=/usr/local/bin/xray run -config /usr/local/etc/xray/config.json
-Restart=on-failure
-RestartSec=5s
-[Install]
-WantedBy=multi-user.target
-SVCEOF
-        systemctl daemon-reload
-    fi
-
-    # 下载 geo 数据文件（DNS 分流 + 路由规则需要）
-    info "下载 geo 数据文件..."
-    mkdir -p /usr/local/share/xray
-    GEO_OK=true
-    curl -sLo /usr/local/share/xray/geosite.dat --retry 3 --retry-delay 10 \
-        https://github.com/v2fly/domain-list-community/releases/latest/download/dlc.dat || GEO_OK=false
-    curl -sLo /usr/local/share/xray/geoip.dat --retry 3 --retry-delay 10 \
-        https://github.com/v2fly/geoip/releases/latest/download/geoip.dat || GEO_OK=false
-    if $GEO_OK; then
-        ln -sf /usr/local/share/xray/geosite.dat /usr/local/bin/geosite.dat
-        ln -sf /usr/local/share/xray/geoip.dat /usr/local/bin/geoip.dat
-        info "geo 数据下载完成"
-    else
-        warn "geo 数据下载失败，将使用无 geo 路由的精简配置"
-    fi
-
-    # 写入配置（VLESS Reality + VLESS XHTTP + DNS + Routing）
-    mkdir -p /usr/local/etc/xray
-    cat > /usr/local/etc/xray/config.json << XEOF
-{
-  "log": {"loglevel": "info"},
-  "dns": {
-    "servers": [
-      "1.1.1.1",
-      "8.8.8.8",
-      "localhost"
-    ]
-  },
-  "routing": {
-    "domainStrategy": "IPIfNonMatch",
-    "rules": [
-      {
-        "type": "field",
-        "domain": ["geosite:category-ads-all"],
-        "outboundTag": "block"
-      },
-      {
-        "type": "field",
-        "ip": ["geoip:private"],
-        "outboundTag": "block"
-      }
-    ]
-  },
-  "inbounds": [
-    {
-      "tag": "vless-reality",
-      "listen": "::",
-      "port": ${REALITY_PORT},
-      "protocol": "vless",
-      "settings": {
-        "clients": [${CLIENT_JSON}],
-        "decryption": "none"
-      },
-      "streamSettings": {
-        "network": "raw",
-        "security": "reality",
-        "realitySettings": {
-          "show": false,
-          "target": "${REALITY_TARGET}",
-          "xver": 0,
-          "serverNames": ["$(echo ${REALITY_TARGET} | cut -d: -f1)"],
-          "privateKey": "${REALITY_PRIVKEY}",
-          "shortIds": ["${REALITY_SHORTID}"]
-        }
-      },
-      "sniffing": {"enabled": true, "destOverride": ["http","tls","quic"], "routeOnly": true}
-    },
-    {
-      "tag": "vless-xhttp",
-      "listen": "127.0.0.1",
-      "port": ${XHTTP_PORT},
-      "protocol": "vless",
-      "settings": {
-        "clients": [{"id": "${XHTTP_UUID}", "email": "vless-cdn"}],
-        "decryption": "none"
-      },
-      "streamSettings": {
-        "network": "xhttp",
-        "xhttpSettings": {
-          "path": "${XHTTP_PATH}",
-          "mode": "auto"
-        }
-      },
-      "sniffing": {"enabled": true, "destOverride": ["http","tls"]}
-    }
-  ],
-  "outbounds": [
-    {"tag": "direct", "protocol": "freedom"},
-    {"tag": "block", "protocol": "blackhole"}
-  ]
-}
-XEOF
-
-    # 自动重启
-    mkdir -p /etc/systemd/system/xray.service.d
-    cat > /etc/systemd/system/xray.service.d/restart.conf << EOF
-[Service]
-Restart=on-failure
-RestartSec=5s
-EOF
-
-    # geo 下载失败时移除 geo 路由规则（否则 Xray 无法启动）
-    if ! $GEO_OK; then
-        python3 -c "
-import json
-c = json.load(open('/usr/local/etc/xray/config.json'))
-del c['routing']
-c['dns'] = {'servers': ['1.1.1.1', '8.8.8.8', 'localhost']}
-json.dump(c, open('/usr/local/etc/xray/config.json', 'w'), indent=2)
-" 2>/dev/null || true
-        info "已降级为无 geo 路由配置"
-    fi
-
-    systemctl daemon-reload
-    # 记录并释放 443 端口
-    _kill_port 443 "Xray" true
-    sleep 1
-    systemctl enable --now xray > /dev/null 2>&1
-    systemctl is-active --quiet xray && info "Xray 已启动 (VLESS Reality + VLESS XHTTP)" || err "Xray 启动失败"
+download_file() {
+    local url=$1 output=$2
+    curl -fL --retry 3 --retry-delay 2 --connect-timeout 15 --max-time 240 -o "$output" "$url"
+    [[ -s "$output" ]] || die "下载为空：$url"
 }
 
-# 仅更新配置（Xray 二进制已安装时）
-install_xray_config_only() {
-    # 优先复用已有 Reality 密钥（避免客户端断连）
-    if [ -f /usr/local/etc/xray/config.json ] && grep -q '"privateKey"' /usr/local/etc/xray/config.json 2>/dev/null; then
-        REALITY_PRIVKEY=$(python3 -c "import json;c=json.load(open('/usr/local/etc/xray/config.json'));print(c['inbounds'][0]['streamSettings']['realitySettings']['privateKey'])" 2>/dev/null)
-        REALITY_SHORTID=$(python3 -c "import json;c=json.load(open('/usr/local/etc/xray/config.json'));print(c['inbounds'][0]['streamSettings']['realitySettings']['shortIds'][0])" 2>/dev/null)
-        # 从私钥推导公钥
-        REALITY_PUBKEY=$(echo "$REALITY_PRIVKEY" | /usr/local/bin/xray x25519 -i 2>/dev/null | grep "Public" | awk '{print $NF}')
-        [ -n "$REALITY_PRIVKEY" ] && info "复用已有 Reality 密钥" || {
-            warn "读取旧密钥失败，生成新密钥"
-            REALITY_KEYPAIR=$(/usr/local/bin/xray x25519 2>/dev/null)
-            REALITY_PRIVKEY=$(echo "$REALITY_KEYPAIR" | grep "Private" | awk '{print $NF}')
-            REALITY_PUBKEY=$(echo "$REALITY_KEYPAIR" | grep "Public" | awk '{print $NF}')
-            REALITY_SHORTID=$(openssl rand -hex 8)
-        }
-    else
-        REALITY_KEYPAIR=$(/usr/local/bin/xray x25519 2>/dev/null)
-        REALITY_PRIVKEY=$(echo "$REALITY_KEYPAIR" | grep "Private" | awk '{print $NF}')
-        REALITY_PUBKEY=$(echo "$REALITY_KEYPAIR" | grep "Public" | awk '{print $NF}')
-        REALITY_SHORTID=$(openssl rand -hex 8)
-    fi
-
-    CLIENT_JSON=""
-    for i in $(seq 0 $((CLIENT_COUNT - 1))); do
-        [ -n "$CLIENT_JSON" ] && CLIENT_JSON+=","
-        CLIENT_JSON+="{\"id\":\"${VL_UUIDS[$i]}\",\"flow\":\"xtls-rprx-vision\",\"email\":\"${CLIENT_NAMES[$i]}\"}"
-    done
-
-    mkdir -p /usr/local/etc/xray
-
-    # 确保 geo 文件存在
-    GEO_OK=true
-    if [ ! -f /usr/local/bin/geosite.dat ]; then
-        info "下载 geo 数据文件..."
-        mkdir -p /usr/local/share/xray
-        curl -sLo /usr/local/share/xray/geosite.dat --retry 3 --retry-delay 10 \
-            https://github.com/v2fly/domain-list-community/releases/latest/download/dlc.dat || GEO_OK=false
-        curl -sLo /usr/local/share/xray/geoip.dat --retry 3 --retry-delay 10 \
-            https://github.com/v2fly/geoip/releases/latest/download/geoip.dat || GEO_OK=false
-        if $GEO_OK; then
-            ln -sf /usr/local/share/xray/geosite.dat /usr/local/bin/geosite.dat
-            ln -sf /usr/local/share/xray/geoip.dat /usr/local/bin/geoip.dat
-            info "geo 数据下载完成"
-        else
-            warn "geo 数据下载失败，将使用无 geo 路由的精简配置"
-        fi
-    fi
-
-    cat > /usr/local/etc/xray/config.json << XEOF
-{
-  "log": {"loglevel": "info"},
-  "dns": {
-    "servers": [
-      "1.1.1.1",
-      "8.8.8.8",
-      "localhost"
-    ]
-  },
-  "routing": {
-    "domainStrategy": "IPIfNonMatch",
-    "rules": [
-      {
-        "type": "field",
-        "domain": ["geosite:category-ads-all"],
-        "outboundTag": "block"
-      },
-      {
-        "type": "field",
-        "ip": ["geoip:private"],
-        "outboundTag": "block"
-      }
-    ]
-  },
-  "inbounds": [
-    {
-      "tag": "vless-reality",
-      "listen": "::",
-      "port": ${REALITY_PORT},
-      "protocol": "vless",
-      "settings": {
-        "clients": [${CLIENT_JSON}],
-        "decryption": "none"
-      },
-      "streamSettings": {
-        "network": "raw",
-        "security": "reality",
-        "realitySettings": {
-          "show": false,
-          "target": "${REALITY_TARGET}",
-          "xver": 0,
-          "serverNames": ["$(echo ${REALITY_TARGET} | cut -d: -f1)"],
-          "privateKey": "${REALITY_PRIVKEY}",
-          "shortIds": ["${REALITY_SHORTID}"]
-        }
-      },
-      "sniffing": {"enabled": true, "destOverride": ["http","tls","quic"], "routeOnly": true}
-    },
-    {
-      "tag": "vless-xhttp",
-      "listen": "127.0.0.1",
-      "port": ${XHTTP_PORT},
-      "protocol": "vless",
-      "settings": {
-        "clients": [{"id": "${XHTTP_UUID}", "email": "vless-cdn"}],
-        "decryption": "none"
-      },
-      "streamSettings": {
-        "network": "xhttp",
-        "xhttpSettings": {
-          "path": "${XHTTP_PATH}",
-          "mode": "auto"
-        }
-      },
-      "sniffing": {"enabled": true, "destOverride": ["http","tls"]}
-    }
-  ],
-  "outbounds": [
-    {"tag": "direct", "protocol": "freedom"},
-    {"tag": "block", "protocol": "blackhole"}
-  ]
-}
-XEOF
-
-    # 确保 systemd 存在
-    if [ ! -f /etc/systemd/system/xray.service ]; then
-        cat > /etc/systemd/system/xray.service << SVCEOF
-[Unit]
-Description=Xray Service
-After=network.target
-[Service]
-Type=simple
-ExecStart=/usr/local/bin/xray run -config /usr/local/etc/xray/config.json
-Restart=on-failure
-RestartSec=5s
-[Install]
-WantedBy=multi-user.target
-SVCEOF
-    fi
-    # geo 下载失败时移除 geo 路由规则
-    if ! $GEO_OK; then
-        python3 -c "
-import json
-c = json.load(open('/usr/local/etc/xray/config.json'))
-del c['routing']
-c['dns'] = {'servers': ['1.1.1.1', '8.8.8.8', 'localhost']}
-json.dump(c, open('/usr/local/etc/xray/config.json', 'w'), indent=2)
-" 2>/dev/null || true
-        info "已降级为无 geo 路由配置"
-    fi
-
-    systemctl daemon-reload
-    # 释放 443 端口
-    _kill_port 443 "Xray" true
-    sleep 1
-    systemctl enable --now xray > /dev/null 2>&1
-    systemctl is-active --quiet xray && info "Xray 配置已更新并重启 ✅" || err "Xray 启动失败，检查 journalctl -u xray"
-    chmod 600 /usr/local/etc/xray/config.json 2>/dev/null || true
-}
-
-#==============================================================================
-#  ██████ 安装 Hysteria2 ██████
-#==============================================================================
-install_hysteria() {
-    step "安装 Hysteria2"
-
-    # 下载最新版
-    LATEST=$(curl -s --max-time 10 --retry 3 https://api.github.com/repos/apernet/hysteria/releases/latest | grep tag_name | cut -d'"' -f4)
-    ARCH=$(uname -m)
-    case "$ARCH" in
-        x86_64)  ARCH="amd64" ;;
-        aarch64) ARCH="arm64" ;;
-        armv7l)  ARCH="arm" ;;
-        *)       err "不支持的架构: $ARCH" ; return 1 ;;
+architecture() {
+    case "$(uname -m)" in
+        x86_64) printf 'amd64' ;;
+        aarch64|arm64) printf 'arm64' ;;
+        *) die "仅支持 x86_64/amd64 和 aarch64/arm64" ;;
     esac
-    curl -sL --max-time 120 --retry 3 -o /tmp/hysteria \
-        "https://github.com/apernet/hysteria/releases/download/${LATEST}/hysteria-linux-${ARCH}"
-    mv /tmp/hysteria /usr/local/bin/hysteria 2>/dev/null
-    chmod +x /usr/local/bin/hysteria
+}
 
-    # 配置目录
-    mkdir -p /etc/hysteria /var/lib/hysteria/acme
+install_xray_binary() {
+    local arch current="" asset checksum temp_dir
+    arch=$(architecture)
+    if [[ -x /usr/local/bin/xray ]]; then
+        current=$(/usr/local/bin/xray version 2>/dev/null | sed -n '1p' || true)
+    fi
+    if grep -q "${XRAY_VERSION#v}" <<<"$current"; then
+        info "Xray ${XRAY_VERSION} 已安装"
+        return
+    fi
+    if [[ "$arch" == "amd64" ]]; then
+        asset="Xray-linux-64.zip"
+        checksum="23cd9af937744d97776ee35ecad4972cf4b2109d1e0fe6be9930467608f7c8ae"
+    else
+        asset="Xray-linux-arm64-v8a.zip"
+        checksum="4d30283ae614e3057f730f67cd088a42be6fdf91f8639d82cb69e48cde80413c"
+    fi
+    new_temp_dir
+    temp_dir=$NEW_TEMP_DIR
+    info "下载并校验 Xray ${XRAY_VERSION}"
+    download_file "https://github.com/XTLS/Xray-core/releases/download/${XRAY_VERSION}/${asset}" "$temp_dir/xray.zip"
+    sha256_verify "$temp_dir/xray.zip" "$checksum"
+    unzip -q "$temp_dir/xray.zip" xray geoip.dat geosite.dat -d "$temp_dir"
+    install -m 0755 "$temp_dir/xray" /usr/local/bin/xray
+    install -d -m 0755 /usr/local/share/xray
+    install -m 0644 "$temp_dir/geoip.dat" "$temp_dir/geosite.dat" /usr/local/share/xray/
+}
 
-    # 写入配置
-    cat > /etc/hysteria/config.yaml << YEOF
+install_hysteria_binary() {
+    local arch current="" asset checksum temp_dir
+    arch=$(architecture)
+    if [[ -x /usr/local/bin/hysteria ]]; then
+        current=$(/usr/local/bin/hysteria version 2>&1 | tr -d '\r' || true)
+    fi
+    if grep -q "${HYSTERIA_VERSION#app/}" <<<"$current"; then
+        info "Hysteria ${HYSTERIA_VERSION#app/} 已安装"
+        return
+    fi
+    if [[ "$arch" == "amd64" ]]; then
+        asset="hysteria-linux-amd64"
+        checksum="ffc032c7ca6b78676d337097ca7f61bebc3a90a4f3a656693adf368f304cdbc7"
+    else
+        asset="hysteria-linux-arm64"
+        checksum="c9cd1af6395eee13a937f429ea71b290e3cc571eea2b4d7f8bc7c49c1d23a792"
+    fi
+    new_temp_dir
+    temp_dir=$NEW_TEMP_DIR
+    info "下载并校验 Hysteria ${HYSTERIA_VERSION#app/}"
+    download_file "https://github.com/apernet/hysteria/releases/download/${HYSTERIA_VERSION}/${asset}" "$temp_dir/hysteria"
+    sha256_verify "$temp_dir/hysteria" "$checksum"
+    install -m 0755 "$temp_dir/hysteria" /usr/local/bin/hysteria
+}
+
+ensure_service_users() {
+    getent group xray >/dev/null || groupadd --system xray
+    id xray >/dev/null 2>&1 || useradd --system --gid xray --home-dir /nonexistent --shell /usr/sbin/nologin xray
+    getent group hysteria >/dev/null || groupadd --system hysteria
+    id hysteria >/dev/null 2>&1 || useradd --system --gid hysteria --home-dir /var/lib/hysteria --shell /usr/sbin/nologin hysteria
+    install -d -m 0750 -o hysteria -g hysteria /var/lib/hysteria /var/lib/hysteria/acme
+    if $ENABLE_CDN; then
+        getent group caddy >/dev/null || groupadd --system caddy
+        id caddy >/dev/null 2>&1 || useradd --system --gid caddy --home-dir /var/lib/caddy --shell /usr/sbin/nologin caddy
+        install -d -m 0750 -o caddy -g caddy /var/lib/caddy
+    fi
+}
+
+new_uuid() {
+    cat /proc/sys/kernel/random/uuid
+}
+
+ensure_secrets() {
+    VR_CLASH_UUID="${STATE_VR_CLASH_UUID:-}"
+    VR_LOON_UUID="${STATE_VR_LOON_UUID:-}"
+    HY2_PASS="${STATE_HY2_PASS:-}"
+    XHTTP_UUID="${STATE_XHTTP_UUID:-}"
+    XHTTP_PATH="${STATE_XHTTP_PATH:-}"
+    WS_UUID="${STATE_WS_UUID:-}"
+    WS_PATH="${STATE_WS_PATH:-}"
+    SUB_TOKEN="${STATE_SUB_TOKEN:-}"
+    REALITY_PRIVKEY="${STATE_REALITY_PRIVKEY:-}"
+    REALITY_PUBKEY="${STATE_REALITY_PUBKEY:-}"
+    REALITY_SHORTID="${STATE_REALITY_SHORTID:-}"
+
+    valid_uuid "$VR_CLASH_UUID" || VR_CLASH_UUID=$(new_uuid)
+    valid_uuid "$VR_LOON_UUID" || VR_LOON_UUID=$(new_uuid)
+    [[ "$HY2_PASS" =~ ^[A-Za-z0-9._~-]{16,128}$ ]] || HY2_PASS=$(openssl rand -hex 24)
+    valid_uuid "$XHTTP_UUID" || XHTTP_UUID=$(new_uuid)
+    valid_xhttp_path "$XHTTP_PATH" || XHTTP_PATH="/${XHTTP_UUID%%-*}-xhttp"
+    valid_uuid "$WS_UUID" || WS_UUID=$(new_uuid)
+    valid_ws_path "$WS_PATH" || WS_PATH="/${WS_UUID%%-*}-ws"
+    [[ "$WS_PATH" != "$XHTTP_PATH" ]] || WS_PATH="/${WS_UUID%%-*}-ws"
+    [[ "$SUB_TOKEN" =~ ^[a-f0-9]{24,64}$ ]] || SUB_TOKEN=$(openssl rand -hex 18)
+
+    if [[ -z "$REALITY_PRIVKEY" ]]; then
+        local keypair
+        keypair=$(/usr/local/bin/xray x25519)
+        REALITY_PRIVKEY=$(awk -F': ' '/^PrivateKey:/ {print $2}' <<<"$keypair")
+        REALITY_PUBKEY=$(awk -F': ' '/PublicKey/ {print $2}' <<<"$keypair")
+    elif [[ -z "$REALITY_PUBKEY" ]]; then
+        REALITY_PUBKEY=$(/usr/local/bin/xray x25519 -i "$REALITY_PRIVKEY" |
+            awk -F': ' '/PublicKey/ {print $2}')
+    fi
+    [[ "$REALITY_PRIVKEY" =~ ^[A-Za-z0-9_-]{40,64}$ ]] || die "Reality 私钥生成/迁移失败"
+    [[ "$REALITY_PUBKEY" =~ ^[A-Za-z0-9_-]{40,64}$ ]] || die "Reality 公钥生成/推导失败"
+    valid_short_id "$REALITY_SHORTID" || REALITY_SHORTID=$(openssl rand -hex 8)
+}
+
+probe_reality_target() {
+    local output successes
+    output=$(timeout 20 /usr/local/bin/xray tls ping "$REALITY_TARGET" 2>&1 || true)
+    successes=$(grep -c 'Handshake succeeded' <<<"$output" || true)
+    if (( successes < 2 )); then
+        err "$output"
+        die "Reality target 未同时通过无 SNI/有 SNI TLS 探测；请设置 REALITY_TARGET_ENV"
+    fi
+    grep -q 'TLS Version:.*TLS 1.3' <<<"$output" || die "Reality target 不支持 TLS 1.3"
+    info "Reality target TLS 1.3 探测通过"
+}
+
+backup_file() {
+    local path=$1 backup_dir
+    BACKUP_FILE_PATH=""
+    [[ -e "$path" ]] || return 0
+    backup_dir="${BACKUP_ROOT}/$(date +%Y%m%dT%H%M%S)"
+    install -d -m 0700 "$backup_dir"
+    cp -a -- "$path" "$backup_dir/"
+    BACKUP_FILE_PATH="${backup_dir}/$(basename "$path")"
+    info "已备份 $path → $backup_dir"
+}
+
+rollback_config() {
+    local config=$1 backup=$2 service=$3
+    [[ -n "$backup" && -e "$backup" ]] || return 0
+    cp -a -- "$backup" "$config"
+    warn "${service} 新配置失败，已恢复备份：${backup}"
+    systemctl restart "$service" >/dev/null 2>&1 || \
+        warn "${service} 恢复旧配置后仍无法启动，需要人工检查"
+}
+
+render_xray_config() {
+    local config=$1 cdn_blocks=""
+    if $ENABLE_CDN; then
+        cdn_blocks=$(cat <<EOF
+,
+    {
+      "tag": "vless-xhttp",
+      "listen": "127.0.0.1",
+      "port": ${XHTTP_PORT},
+      "protocol": "vless",
+      "settings": {
+        "clients": [{"id": "${XHTTP_UUID}", "email": "cdn"}],
+        "decryption": "none"
+      },
+      "streamSettings": {
+        "network": "xhttp",
+        "security": "none",
+        "xhttpSettings": {"path": "${XHTTP_PATH}"}
+      },
+      "sniffing": {"enabled": true, "destOverride": ["http", "tls"]}
+    },
+    {
+      "tag": "vless-websocket",
+      "listen": "127.0.0.1",
+      "port": ${WS_PORT},
+      "protocol": "vless",
+      "settings": {
+        "clients": [{"id": "${WS_UUID}", "email": "cdn-websocket"}],
+        "decryption": "none"
+      },
+      "streamSettings": {
+        "network": "websocket",
+        "security": "none",
+        "wsSettings": {"path": "${WS_PATH}"}
+      },
+      "sniffing": {"enabled": true, "destOverride": ["http", "tls"]}
+    }
+EOF
+)
+    fi
+    cat > "$config" <<EOF
+{
+  "log": {"loglevel": "warning"},
+  "routing": {
+    "domainStrategy": "IPIfNonMatch",
+    "rules": [
+      {"type": "field", "ip": ["geoip:private"], "outboundTag": "block"}
+    ]
+  },
+  "inbounds": [
+    {
+      "tag": "vless-reality",
+      "listen": "${XRAY_LISTEN:-0.0.0.0}",
+      "port": ${REALITY_PORT},
+      "protocol": "vless",
+      "settings": {
+        "clients": [
+          {"id": "${VR_CLASH_UUID}", "flow": "xtls-rprx-vision", "email": "clash"},
+          {"id": "${VR_LOON_UUID}", "flow": "xtls-rprx-vision", "email": "loon"}
+        ],
+        "decryption": "none"
+      },
+      "streamSettings": {
+        "network": "raw",
+        "security": "reality",
+        "realitySettings": {
+          "show": false,
+          "target": "${REALITY_TARGET}",
+          "xver": 0,
+          "serverNames": ["${REALITY_SNI}"],
+          "privateKey": "${REALITY_PRIVKEY}",
+          "shortIds": ["${REALITY_SHORTID}"]
+        }
+      },
+      "sniffing": {"enabled": true, "destOverride": ["http", "tls", "quic"], "routeOnly": true}
+    }${cdn_blocks}
+  ],
+  "outbounds": [
+    {"tag": "direct", "protocol": "freedom"},
+    {"tag": "block", "protocol": "blackhole"}
+  ]
+}
+EOF
+}
+
+write_xray_config() {
+    local temp_dir config old_config
+    new_temp_dir
+    temp_dir=$NEW_TEMP_DIR
+    config="$temp_dir/xray.json"
+    render_xray_config "$config"
+    XRAY_LOCATION_ASSET=/usr/local/share/xray \
+        /usr/local/bin/xray run -test -config "$config" >/dev/null
+    install -d -m 0750 -o root -g xray /usr/local/etc/xray
+    backup_file /usr/local/etc/xray/config.json
+    old_config=$BACKUP_FILE_PATH
+    install -m 0640 -o root -g xray "$config" /usr/local/etc/xray/config.json
+
+    cat > /etc/systemd/system/xray.service <<'EOF'
+# Managed by vps-deploy.sh v4
+[Unit]
+Description=Xray proxy service
+Documentation=https://github.com/XTLS/Xray-core
+After=network-online.target nss-lookup.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=xray
+Group=xray
+Environment=XRAY_LOCATION_ASSET=/usr/local/share/xray
+ExecStart=/usr/local/bin/xray run -config /usr/local/etc/xray/config.json
+Restart=on-failure
+RestartSec=3s
+LimitNOFILE=1048576
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+
+[Install]
+WantedBy=multi-user.target
+EOF
+    chmod 0644 /etc/systemd/system/xray.service
+    systemctl daemon-reload
+    systemctl enable xray.service >/dev/null
+    if ! systemctl restart xray.service || ! systemctl is-active --quiet xray.service; then
+        journalctl -u xray.service --no-pager -n 30 >&2 || true
+        rollback_config /usr/local/etc/xray/config.json "$old_config" xray.service
+        die "Xray 启动失败"
+    fi
+}
+
+render_hysteria_config() {
+    local config=$1 email_line dns_block=""
+    email_line="  email: ${EMAIL}"
+    if [[ "$ACME_MODE" == "dns" ]]; then
+        dns_block=$(cat <<EOF
+  dns:
+    name: cloudflare
+    config:
+      cloudflare_api_token: ${CF_DNS_TOKEN}
+EOF
+)
+    fi
+    cat > "$config" <<EOF
 listen: :${HY2_PORT}
 
 acme:
   domains:
     - ${DOMAIN}
-  email: ${EMAIL}
+${email_line}
   ca: letsencrypt
   dir: /var/lib/hysteria/acme
   type: ${ACME_MODE}
-YEOF
-    # DNS-01 模式：追加 Cloudflare DNS 配置
-    if [ "$ACME_MODE" = "dns" ] && [ -n "$CF_DNS_TOKEN" ]; then
-        cat >> /etc/hysteria/config.yaml << YEOF
-  dns:
-    name: cloudflare
-    config:
-      auth_token: ${CF_DNS_TOKEN}
-YEOF
-    fi
-    cat >> /etc/hysteria/config.yaml << YEOF
+${dns_block}
 
 auth:
   type: password
@@ -944,896 +896,846 @@ masquerade:
     url: ${HY2_MASQUERADE_URL}
     rewriteHost: true
     insecure: false
-YEOF
+EOF
+}
 
-    # systemd（含启动限速，防止 ACME 失败时死循环耗尽 Let's Encrypt 限额）
-    cat > /etc/systemd/system/hysteria-server.service << EOF
+write_hysteria_config() {
+    local temp_dir config old_config
+    new_temp_dir
+    temp_dir=$NEW_TEMP_DIR
+    config="$temp_dir/hysteria.yaml"
+    render_hysteria_config "$config"
+    install -d -m 0750 -o root -g hysteria /etc/hysteria
+    backup_file /etc/hysteria/config.yaml
+    old_config=$BACKUP_FILE_PATH
+    install -m 0640 -o root -g hysteria "$config" /etc/hysteria/config.yaml
+
+    cat > /etc/systemd/system/hysteria-server.service <<'EOF'
+# Managed by vps-deploy.sh v4
 [Unit]
-Description=Hysteria Server Service
-After=network.target
-StartLimitBurst=5
+Description=Hysteria 2 server
+Documentation=https://hysteria.network/
+After=network-online.target
+Wants=network-online.target
 StartLimitIntervalSec=600
+StartLimitBurst=5
 
 [Service]
 Type=simple
+User=hysteria
+Group=hysteria
+WorkingDirectory=/var/lib/hysteria
 ExecStart=/usr/local/bin/hysteria server -c /etc/hysteria/config.yaml
 Restart=on-failure
 RestartSec=30s
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/hysteria
 
 [Install]
 WantedBy=multi-user.target
 EOF
-
+    chmod 0644 /etc/systemd/system/hysteria-server.service
     systemctl daemon-reload
-    # HTTP-01 模式需要 80 端口；DNS-01 模式无需
-    if [ "$ACME_MODE" = "http" ]; then
-        _kill_port 80 "Hysteria ACME"
-        sleep 1
-        ufw allow 80/tcp comment "ACME temp" > /dev/null 2>&1
+    systemctl enable hysteria-server.service >/dev/null
+    if ! systemctl restart hysteria-server.service; then
+        journalctl -u hysteria-server.service --no-pager -n 30 >&2 || true
+        rollback_config /etc/hysteria/config.yaml "$old_config" hysteria-server.service
+        die "Hysteria2 无法启动"
     fi
-    systemctl enable --now hysteria-server > /dev/null 2>&1
-    # 轮询等待证书获取（最多 60 秒，DNS-01 可能需要更长时间）
-    for i in $(seq 1 12); do
-        sleep 5
-        ls /var/lib/hysteria/acme/*.crt >/dev/null 2>&1 && break
-    done
-    # HTTP-01 模式关闭 80 端口
-    [ "$ACME_MODE" = "http" ] && ufw delete allow 80/tcp > /dev/null 2>&1
-    if systemctl is-active --quiet hysteria-server 2>/dev/null; then
-        info "Hysteria2 已启动"
-        chmod 600 /etc/hysteria/config.yaml 2>/dev/null || true
-        _restore_ports   # 证书获取完毕，恢复被暂停的服务 (nginx 等)
-    else
-        err "Hysteria2 启动失败"
-        # 检查是否是 Let's Encrypt 限速
-        if journalctl -u hysteria-server --no-pager -n 5 2>/dev/null | grep -qi "rateLimited\|rate.limit\|too many certificates"; then
-            warn "Let's Encrypt 证书限速！该域名本周已申请 5 次证书"
-            warn "Hysteria2 将在限速解除后自动重试（每10分钟最多5次）"
-            warn "手动检查: journalctl -u hysteria-server --no-pager -n 10"
+
+    for _ in $(seq 1 60); do
+        if systemctl is-active --quiet hysteria-server.service && \
+            ss -H -lun "sport = :${HY2_PORT}" 2>/dev/null | grep -q .; then
+            break
         fi
-        _restore_ports   # 即使失败也恢复，至少别让原服务一直停着
+        sleep 3
+    done
+    if ! systemctl is-active --quiet hysteria-server.service || \
+        ! ss -H -lun "sport = :${HY2_PORT}" 2>/dev/null | grep -q .; then
+        journalctl -u hysteria-server.service --no-pager -n 30 >&2 || true
+        rollback_config /etc/hysteria/config.yaml "$old_config" hysteria-server.service
+        die "Hysteria2 启动或 ACME 申请失败"
+    fi
+    if find /var/lib/hysteria/acme -type f -name '*.crt' -print -quit | grep -q .; then
+        info "Hysteria2 证书已就绪"
+    else
+        warn "Hysteria2 已运行，但未在 ACME 目录中定位到 .crt；请检查日志"
     fi
 }
 
-# 仅更新 Hysteria2 配置（二进制已安装时）
+render_caddy_config() {
+    local caddyfile=$1
+    cat > "$caddyfile" <<EOF
+{
+	admin off
+	auto_https off
+}
 
-# 仅更新 Hysteria2 配置（二进制已安装时）
-install_hysteria_config_only() {
-    mkdir -p /etc/hysteria
-    cat > /etc/hysteria/config.yaml << YEOF
-listen: :${HY2_PORT}
+:${CADDY_ORIGIN_PORT} {
+	# 仅绑定回环地址，但接受 Cloudflare 保留的原始 Host。
+	bind 127.0.0.1
 
-acme:
-  domains:
-    - ${DOMAIN}
-  email: ${EMAIL}
-  ca: letsencrypt
-  dir: /var/lib/hysteria/acme
-  type: ${ACME_MODE}
-YEOF
-    # DNS-01 模式：追加 Cloudflare DNS 配置
-    if [ "$ACME_MODE" = "dns" ] && [ -n "$CF_DNS_TOKEN" ]; then
-        cat >> /etc/hysteria/config.yaml << YEOF
-  dns:
-    name: cloudflare
-    config:
-      auth_token: ${CF_DNS_TOKEN}
-YEOF
-    fi
-    cat >> /etc/hysteria/config.yaml << YEOF
+	@xhttp path ${XHTTP_PATH} ${XHTTP_PATH}/*
+	handle @xhttp {
+		reverse_proxy 127.0.0.1:${XHTTP_PORT}
+	}
 
-auth:
-  type: password
-  password: ${HY2_PASS}
+	@websocket path ${WS_PATH} ${WS_PATH}/*
+	handle @websocket {
+		reverse_proxy 127.0.0.1:${WS_PORT}
+	}
 
-congestion:
-  type: bbr
-  bbrProfile: standard
-
-quic:
-  initStreamReceiveWindow: 8388608
-  maxStreamReceiveWindow: 16777216
-  initConnReceiveWindow: 16777216
-  maxConnReceiveWindow: 33554432
-  maxIdleTimeout: 60s
-
-udpIdleTimeout: 60s
-
-masquerade:
-  type: proxy
-  proxy:
-    url: ${HY2_MASQUERADE_URL}
-    rewriteHost: true
-    insecure: false
-YEOF
-
-    # systemd 兜底（含启动限速）
-    if [ ! -f /etc/systemd/system/hysteria-server.service ]; then
-        cat > /etc/systemd/system/hysteria-server.service << EOF
-[Unit]
-Description=Hysteria Server Service
-After=network.target
-StartLimitBurst=5
-StartLimitIntervalSec=600
-
-[Service]
-Type=simple
-ExecStart=/usr/local/bin/hysteria server -c /etc/hysteria/config.yaml
-Restart=on-failure
-RestartSec=30s
-[Install]
-WantedBy=multi-user.target
+	handle {
+		root * ${SUB_ROOT}
+		header {
+			Cache-Control "no-store"
+			X-Content-Type-Options "nosniff"
+		}
+		file_server
+	}
+}
 EOF
-    else
-        # 确保已有 systemd unit 也有限速参数
-        if ! grep -q "StartLimitBurst" /etc/systemd/system/hysteria-server.service 2>/dev/null; then
-            sed -i '/^\[Unit\]$/a StartLimitBurst=5\nStartLimitIntervalSec=600' /etc/systemd/system/hysteria-server.service
-        fi
-        sed -i 's/^RestartSec=.*/RestartSec=30s/' /etc/systemd/system/hysteria-server.service 2>/dev/null || true
-    fi
-    systemctl daemon-reload
-    # HTTP-01 模式需要 80 端口；DNS-01 模式无需
-    if [ "$ACME_MODE" = "http" ]; then
-        _kill_port 80 "Hysteria ACME"
-        sleep 1
-        ufw allow 80/tcp comment "ACME temp" > /dev/null 2>&1
-    fi
-    systemctl restart hysteria-server
-    # 轮询等待证书获取（最多 60 秒）
-    for i in $(seq 1 12); do
-        sleep 5
-        ls /var/lib/hysteria/acme/*.crt >/dev/null 2>&1 && break
-    done
-    [ "$ACME_MODE" = "http" ] && ufw delete allow 80/tcp > /dev/null 2>&1
-    if systemctl is-active --quiet hysteria-server 2>/dev/null; then
-        info "Hysteria2 配置已更新并重启 ✅"
-        _restore_ports
-    else
-        warn "Hysteria2 启动失败（可能 DNS 未就绪或证书限流，稍后自动重试）"
-        if journalctl -u hysteria-server --no-pager -n 5 2>/dev/null | grep -qi "rateLimited\|rate.limit\|too many certificates"; then
-            warn "Let's Encrypt 证书限速！限速解除前重启上限 5次/10分钟"
-        fi
-        _restore_ports
-    fi
 }
 
-#==============================================================================
-#  ██████ 安装 Caddy ██████
-#==============================================================================
+install_caddy_binary() {
+    local arch current="" asset checksum temp_dir
+    arch=$(architecture)
+    if [[ -x /usr/local/bin/caddy ]]; then
+        current=$(/usr/local/bin/caddy version 2>/dev/null | awk '{print $1}' || true)
+    fi
+    if [[ "$current" == "$CADDY_VERSION" ]]; then
+        info "Caddy ${CADDY_VERSION} 已安装"
+        return
+    fi
+    if [[ "$arch" == "amd64" ]]; then
+        asset="caddy_${CADDY_VERSION#v}_linux_amd64.tar.gz"
+        checksum="527fbf917c39189a1e3b31d34fa955601680b2d5c8055d2a87b8b9588dec7bb9"
+    else
+        asset="caddy_${CADDY_VERSION#v}_linux_arm64.tar.gz"
+        checksum="52d42ae12b3462097e9868da6dfed3c9648ae12edd3b3638102312af84cb6904"
+    fi
+    new_temp_dir
+    temp_dir=$NEW_TEMP_DIR
+    info "下载并校验 Caddy ${CADDY_VERSION}"
+    download_file "https://github.com/caddyserver/caddy/releases/download/${CADDY_VERSION}/${asset}" "$temp_dir/caddy.tar.gz"
+    sha256_verify "$temp_dir/caddy.tar.gz" "$checksum"
+    tar -xzf "$temp_dir/caddy.tar.gz" -C "$temp_dir" caddy
+    install -m 0755 "$temp_dir/caddy" /usr/local/bin/caddy
+}
+
 install_caddy() {
-    step "安装 Caddy"
+    $ENABLE_CDN || return 0
+    install_caddy_binary
 
-    apt-get install -y -qq debian-keyring debian-archive-keyring apt-transport-https > /dev/null 2>&1
-    curl -sL 'https://dl.cloudsmith.io/public/caddy/stable/gpg.key' | \
-        gpg --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg 2>/dev/null
-    echo "deb [signed-by=/usr/share/keyrings/caddy-stable-archive-keyring.gpg] https://dl.cloudsmith.io/public/caddy/stable/deb/debian any-version main" \
-        | tee /etc/apt/sources.list.d/caddy-stable.list > /dev/null
-    apt-get update -qq
-    apt-get install -y -qq caddy > /dev/null 2>&1
+    local temp_dir caddyfile old_config
+    new_temp_dir
+    temp_dir=$NEW_TEMP_DIR
+    caddyfile="$temp_dir/Caddyfile"
+    render_caddy_config "$caddyfile"
+    /usr/local/bin/caddy validate --config "$caddyfile" --adapter caddyfile >/dev/null
+    install -d -m 0755 /etc/caddy
+    backup_file /etc/caddy/Caddyfile
+    old_config=$BACKUP_FILE_PATH
+    install -m 0644 -o root -g root "$caddyfile" /etc/caddy/Caddyfile
 
-    # 目录
-    mkdir -p /var/lib/subscription/${SUB_TOKEN} /var/lib/traffic-monitor /etc/vps-proxy
+    cat > /etc/systemd/system/caddy.service <<'EOF'
+# Managed by vps-deploy.sh v4
+[Unit]
+Description=Caddy local origin for vps-proxy
+Documentation=https://caddyserver.com/docs/
+After=network-online.target
+Wants=network-online.target
 
-    # Caddyfile（文件服务器根目录指向 subscription）
-    cat > /etc/caddy/Caddyfile << CEOF
-http://${DOMAIN}:${CADDY_PORT} {
-    root * /var/lib/subscription
-    file_server
-
-    handle_path /traffic/* {
-        root * /var/lib/traffic-monitor
-        file_server
-    }
-
-    handle ${XHTTP_PATH} {
-        reverse_proxy 127.0.0.1:${XHTTP_PORT}
-    }
-}
-CEOF
-
-    # 自动重启
-    mkdir -p /etc/systemd/system/caddy.service.d
-    cat > /etc/systemd/system/caddy.service.d/restart.conf << EOF
 [Service]
+Type=notify
+User=caddy
+Group=caddy
+Environment=XDG_DATA_HOME=/var/lib/caddy/.local/share
+Environment=XDG_CONFIG_HOME=/var/lib/caddy/.config
+ExecStart=/usr/local/bin/caddy run --environ --config /etc/caddy/Caddyfile --adapter caddyfile
+ExecReload=/usr/local/bin/caddy reload --config /etc/caddy/Caddyfile --adapter caddyfile --force
+TimeoutStopSec=5s
+LimitNOFILE=1048576
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/caddy
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target
+EOF
+    chmod 0644 /etc/systemd/system/caddy.service
+    systemctl daemon-reload
+    systemctl enable caddy.service >/dev/null
+    if ! systemctl restart caddy.service || ! systemctl is-active --quiet caddy.service; then
+        journalctl -u caddy.service --no-pager -n 30 >&2 || true
+        rollback_config /etc/caddy/Caddyfile "$old_config" caddy.service
+        die "Caddy 启动失败"
+    fi
+}
+
+install_cloudflared() {
+    $ENABLE_CDN || return 0
+    local arch asset checksum temp_dir current="" cloudflared_bin
+    arch=$(architecture)
+    if command -v cloudflared >/dev/null 2>&1; then
+        current=$(cloudflared --version 2>/dev/null || true)
+    fi
+    if ! grep -q "$CLOUDFLARED_VERSION" <<<"$current"; then
+        if [[ "$arch" == "amd64" ]]; then
+            asset="cloudflared-linux-amd64.deb"
+            checksum="049777d30f9bf93da6df8bbe31383460eb2aa51a832c6551824d56f9fcc55974"
+        else
+            asset="cloudflared-linux-arm64.deb"
+            checksum="d3ea7d22dd337b465da33d6bc1c4b3cfd381407447a2a7d29542c19783430db3"
+        fi
+        new_temp_dir
+        temp_dir=$NEW_TEMP_DIR
+        info "下载并校验 cloudflared ${CLOUDFLARED_VERSION}"
+        download_file "https://github.com/cloudflare/cloudflared/releases/download/${CLOUDFLARED_VERSION}/${asset}" "$temp_dir/cloudflared.deb"
+        sha256_verify "$temp_dir/cloudflared.deb" "$checksum"
+        dpkg -i "$temp_dir/cloudflared.deb" >/dev/null || apt-get install -f -y -qq >/dev/null
+    else
+        info "cloudflared ${CLOUDFLARED_VERSION} 已安装"
+    fi
+
+    if systemctl cat cloudflared.service >/dev/null 2>&1; then
+        if [[ -n "$CF_TOKEN" ]]; then
+            warn "检测到已有 cloudflared 服务；为避免覆盖其他 Tunnel，忽略新 Token"
+        fi
+        if systemctl cat cloudflared.service 2>/dev/null | grep -Eq -- '--token(=|[[:space:]]+)eyJ'; then
+            warn "现有 cloudflared 单元可能内嵌 Tunnel Token；建议按 MANUAL.md 迁移为 600 权限的 token 文件"
+        fi
+        systemctl enable --now cloudflared.service >/dev/null || die "现有 cloudflared 服务无法启动"
+    else
+        [[ -n "$CF_TOKEN" ]] || die "缺少 Tunnel Token，无法注册 cloudflared 服务"
+        cloudflared_bin=$(readlink -f "$(command -v cloudflared)")
+        [[ "$cloudflared_bin" =~ ^/[A-Za-z0-9_./-]+$ && -x "$cloudflared_bin" ]] || \
+            die "cloudflared 可执行文件路径异常"
+        install -d -m 0700 -o root -g root /etc/cloudflared
+        new_temp_dir
+        temp_dir=$NEW_TEMP_DIR
+        printf '%s\n' "$CF_TOKEN" > "$temp_dir/tunnel-token"
+        install -m 0600 -o root -g root "$temp_dir/tunnel-token" /etc/cloudflared/token
+        CF_TOKEN=""
+        cat > /etc/systemd/system/cloudflared.service <<EOF
+# Managed by vps-deploy.sh v4
+[Unit]
+Description=Cloudflare Tunnel client
+Documentation=https://developers.cloudflare.com/tunnel/
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=notify
+ExecStart=${cloudflared_bin} --no-autoupdate tunnel run --token-file /etc/cloudflared/token
 Restart=on-failure
 RestartSec=5s
+TimeoutStartSec=30s
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+ReadOnlyPaths=/etc/cloudflared/token
+
+[Install]
+WantedBy=multi-user.target
 EOF
-
-    systemctl daemon-reload
-    systemctl enable --now caddy > /dev/null 2>&1
-    systemctl is-active --quiet caddy && info "Caddy 已启动" || err "Caddy 启动失败"
-
-    # 收紧密钥文件权限（防止本机其他用户读取凭证）
-    chmod 600 /usr/local/etc/xray/config.json 2>/dev/null || true
+        chmod 0644 /etc/systemd/system/cloudflared.service
+        systemctl daemon-reload
+        systemctl enable --now cloudflared.service >/dev/null || die "cloudflared 服务安装失败"
+    fi
+    systemctl is-active --quiet cloudflared.service || die "cloudflared 未运行"
 }
 
-#==============================================================================
-#  ██████ 安装 vnstat + 流量看板 ██████
-#==============================================================================
-install_vnstat() {
-    step "安装流量监控"
-
-    apt-get install -y -qq vnstat vnstati > /dev/null 2>&1
-
-    # 获取主网卡
-    IFACE=$(ip route | grep default | awk '{print $5}' | head -1)
-    [ -z "$IFACE" ] && IFACE=eth0
-
-    # 看板生成脚本
-    cat > /usr/local/bin/traffic-dashboard.sh << TEOF
-#!/bin/bash
-OUTDIR=/var/lib/traffic-monitor
-IFACE=${IFACE}
-mkdir -p "\$OUTDIR"
-vnstati -i \$IFACE -h -o \$OUTDIR/hourly.png
-vnstati -i \$IFACE -d -o \$OUTDIR/daily.png
-vnstati -i \$IFACE -m -o \$OUTDIR/monthly.png
-vnstati -i \$IFACE -t -o \$OUTDIR/top10.png
-vnstati -i \$IFACE -s -o \$OUTDIR/summary.png
-vnstat -i \$IFACE > \$OUTDIR/summary.txt
-vnstat -i \$IFACE -h > \$OUTDIR/hourly.txt
-vnstat -i \$IFACE -d > \$OUTDIR/daily.txt
-vnstat -i \$IFACE -m > \$OUTDIR/monthly.txt
-vnstat -i \$IFACE -t > \$OUTDIR/top10.txt
-
-REFRESH=\$(date '+%Y-%m-%d %H:%M:%S')
-cat > \$OUTDIR/index.html << 'HTMLEOF'
-<!DOCTYPE html>
-<html lang="zh">
-<head>
-<meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0">
-<title>流量监控</title>
-<style>
-*{margin:0;padding:0;box-sizing:border-box}
-body{background:#0d1117;color:#c9d1d9;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',monospace;padding:20px}
-h1{color:#58a6ff;margin-bottom:20px;font-size:1.5em}
-.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(400px,1fr));gap:20px}
-.card{background:#161b22;border:1px solid #30363d;border-radius:8px;padding:16px}
-.card h2{color:#f0883e;font-size:1em;margin-bottom:10px}
-.card img{width:100%;height:auto;display:block}
-.card pre{font-size:11px;line-height:1.4;overflow-x:auto;color:#8b949e;max-height:360px;overflow-y:auto}
-.refresh{color:#8b949e;font-size:.75em;margin-bottom:16px}
-</style>
-</head>
-<body>
-<h1>📊 流量监控</h1>
-<p class="refresh">更新时间: <span>REFRESH_TIME</span> · 每5分钟刷新 · <a href="javascript:location.reload()" style="color:#58a6ff">手动刷新</a></p>
-<div class="grid">
-<div class="card"><h2>📋 概览</h2><img src="summary.png"></div>
-<div class="card"><h2>🕐 小时</h2><img src="hourly.png"></div>
-<div class="card"><h2>📅 每日</h2><img src="daily.png"></div>
-<div class="card"><h2>📆 每月</h2><img src="monthly.png"></div>
-<div class="card"><h2>🔝 Top10</h2><img src="top10.png"></div>
-</div>
-<h2 style="color:#f0883e;margin-top:20px">📝 文本详情</h2>
-<div class="grid">
-<div class="card"><h2>📋 概览</h2><pre>SUMMARY_TXT</pre></div>
-<div class="card"><h2>🕐 小时</h2><pre>HOURLY_TXT</pre></div>
-<div class="card"><h2>📅 每日</h2><pre>DAILY_TXT</pre></div>
-<div class="card"><h2>📆 每月</h2><pre>MONTHLY_TXT</pre></div>
-<div class="card"><h2>🔝 Top10</h2><pre>TOP10_TXT</pre></div>
-</div>
-</body>
-</html>
-HTMLEOF
-
-sed -i "s|REFRESH_TIME|\$REFRESH|" \$OUTDIR/index.html
-for PLACE in SUMMARY_TXT HOURLY_TXT DAILY_TXT MONTHLY_TXT TOP10_TXT; do
-  FILE=\$(echo \$PLACE | tr '[:upper:]' '[:lower:]')
-  CONTENT=\$(cat "\$OUTDIR/\$FILE" | sed 's/&/\\&/g; s/</\\</g; s/>/\\>/g')
-  sed -i "/\${PLACE}/{r /dev/stdin;d}" \$OUTDIR/index.html <<< "\$CONTENT"
-done
-TEOF
-    chmod +x /usr/local/bin/traffic-dashboard.sh
-
-    # 首次生成
-    /usr/local/bin/traffic-dashboard.sh
-
-    # cron 每5分钟
-    echo "*/5 * * * * root /usr/local/bin/traffic-dashboard.sh" > /etc/cron.d/traffic-dashboard
-
-    info "流量监控已安装 (http://${DOMAIN}:${CADDY_PORT}/traffic/)"
+write_state() {
+    install -d -m 0700 "$STATE_DIR"
+    local temp_dir state
+    new_temp_dir
+    temp_dir=$NEW_TEMP_DIR
+    state="$temp_dir/state.env"
+    {
+        printf 'STATE_VERSION=%q\n' "$SCRIPT_VERSION"
+        printf 'STATE_DOMAIN=%q\n' "$DOMAIN"
+        printf 'STATE_PROVIDER=%q\n' "$PROVIDER"
+        printf 'STATE_EMAIL=%q\n' "$EMAIL"
+        printf 'STATE_ACME_MODE=%q\n' "$ACME_MODE"
+        printf 'STATE_CDN_DOMAIN=%q\n' "$CDN_DOMAIN"
+        printf 'STATE_COUNTRY=%q\n' "$COUNTRY"
+        printf 'STATE_REALITY_TARGET=%q\n' "$REALITY_TARGET"
+        printf 'STATE_XRAY_LISTEN=%q\n' "$XRAY_LISTEN"
+        printf 'STATE_VR_CLASH_UUID=%q\n' "$VR_CLASH_UUID"
+        printf 'STATE_VR_LOON_UUID=%q\n' "$VR_LOON_UUID"
+        printf 'STATE_HY2_PASS=%q\n' "$HY2_PASS"
+        printf 'STATE_XHTTP_UUID=%q\n' "$XHTTP_UUID"
+        printf 'STATE_XHTTP_PATH=%q\n' "$XHTTP_PATH"
+        printf 'STATE_WS_UUID=%q\n' "$WS_UUID"
+        printf 'STATE_WS_PATH=%q\n' "$WS_PATH"
+        printf 'STATE_SUB_TOKEN=%q\n' "$SUB_TOKEN"
+        printf 'STATE_REALITY_PRIVKEY=%q\n' "$REALITY_PRIVKEY"
+        printf 'STATE_REALITY_PUBKEY=%q\n' "$REALITY_PUBKEY"
+        printf 'STATE_REALITY_SHORTID=%q\n' "$REALITY_SHORTID"
+    } > "$state"
+    install -m 0600 -o root -g root "$state" "$STATE_FILE"
 }
 
-#==============================================================================
-#  ██████ 订阅生成器 ██████
-#==============================================================================
-install_sub_generator() {
-    step "订阅生成器"
+write_subscriptions() {
+    local sub_dir="${SUB_ROOT}/${SUB_TOKEN}"
+    install -d -m 0750 "$SUB_ROOT" "$sub_dir"
+    if [[ $(id -u) -eq 0 ]]; then
+        if $ENABLE_CDN; then
+            chown root:caddy "$SUB_ROOT" "$sub_dir"
+        else
+            chown root:root "$SUB_ROOT" "$sub_dir"
+        fi
+    fi
+    local cdn_yaml="" cdn_group="" loon_ws=""
+    if $ENABLE_CDN; then
+        cdn_yaml=$(cat <<EOF
 
-    # 使用 install_caddy 创建的目录
-    SUB_TOKEN=$(cat /etc/vps-proxy/sub-token 2>/dev/null || echo "default")
-    SUB_DIR=/var/lib/subscription/${SUB_TOKEN}
-    mkdir -p "$SUB_DIR" /etc/vps-proxy
-    cat > /etc/vps-proxy/subs.conf << CONFIG
-# 订阅生成器配置 — 由部署脚本自动生成
-SUBDIR="${SUB_DIR}"
-SERVER="${DOMAIN}"
-CADDY_PORT=${CADDY_PORT}
-REALITY_PORT=${REALITY_PORT}
-VL_PUBKEY="${REALITY_PUBKEY}"
-VL_SHORTID="${REALITY_SHORTID}"
-VL_SNI="$(echo ${REALITY_TARGET} | cut -d: -f1)"
-# VLESS UUID 数组（断点续传时复用，避免客户端断连）
-CLIENT_COUNT="${CLIENT_COUNT}"
-VL_UUIDS_0="${VL_UUIDS[0]}"
-VL_UUIDS_1="${VL_UUIDS[1]}"
-VL_UUIDS_2="${VL_UUIDS[2]}"
-VL_UUID="${VL_UUIDS[0]}"
-LOON_VL_UUID="${VL_UUIDS[2]}"
-HY2_PORT=${HY2_PORT}
-HY2_PASS="${HY2_PASS}"
-HY2_SNI="${DOMAIN}"
-XHTTP_UUID="${XHTTP_UUID}"
-XHTTP_PATH="${XHTTP_PATH}"
-NODE_PREFIX="${NODE_PREFIX}"
-NODE_VR="${NODE_PREFIX} ${PROTO_VR}"
-NODE_H2="${NODE_PREFIX} ${PROTO_H2}"
-NODE_VX="${NODE_PREFIX} ${PROTO_VX}"
-# SUB_TOKEN（持久化避免每次重跑轮换）
-SUB_TOKEN="${SUB_TOKEN}"
-CONFIG
-    chmod 600 /etc/vps-proxy/subs.conf 2>/dev/null || true
-
-    # --- 写 gen-subs.sh（带 'GEOF' 防止变量展开）---
-    cat > /usr/local/bin/gen-subs.sh << 'GEOF'
-#!/bin/bash
-# 订阅自动生成器 — Clash Meta (统一) + Loon
-# 用法: /usr/local/bin/gen-subs.sh
-# 配置: /etc/vps-proxy/subs.conf
-
-source /etc/vps-proxy/subs.conf
-
-gen_clash() {
-  cat > "$SUBDIR/clash.yaml" << YEOF
-proxies:
-  - name: ${NODE_VR}
+  - name: "${NODE_PREFIX} VX"
     type: vless
-    server: ${SERVER}
-    port: ${REALITY_PORT}
-    uuid: ${VL_UUID}
+    server: ${CDN_DOMAIN}
+    port: 443
+    uuid: ${XHTTP_UUID}
     udp: true
     tls: true
-    servername: ${VL_SNI}
+    servername: ${CDN_DOMAIN}
+    client-fingerprint: chrome
+    alpn: [h2]
+    network: xhttp
+    xhttp-opts:
+      host: ${CDN_DOMAIN}
+      path: ${XHTTP_PATH}
+      mode: packet-up
+    skip-cert-verify: false
+
+  - name: "${NODE_PREFIX} VW"
+    type: vless
+    server: ${CDN_DOMAIN}
+    port: 443
+    uuid: ${WS_UUID}
+    udp: true
+    tls: true
+    servername: ${CDN_DOMAIN}
+    client-fingerprint: chrome
+    network: ws
+    ws-opts:
+      path: ${WS_PATH}
+      headers:
+        Host: ${CDN_DOMAIN}
+    skip-cert-verify: false
+EOF
+)
+        cdn_group=$(cat <<EOF
+      - "${NODE_PREFIX} VX"
+      - "${NODE_PREFIX} VW"
+EOF
+)
+        loon_ws="${NODE_PREFIX} VW = VLESS,${CDN_DOMAIN},443,\"${WS_UUID}\",transport=ws,path=${WS_PATH},host=${CDN_DOMAIN},over-tls=true,sni=${CDN_DOMAIN},skip-cert-verify=false,udp=true"
+    fi
+    cat > "$sub_dir/clash.yaml" <<EOF
+mixed-port: 7890
+allow-lan: false
+mode: rule
+log-level: warning
+ipv6: true
+
+proxies:
+  - name: "${NODE_PREFIX} VR"
+    type: vless
+    server: ${DOMAIN}
+    port: ${REALITY_PORT}
+    uuid: ${VR_CLASH_UUID}
+    udp: true
+    tls: true
+    servername: ${REALITY_SNI}
     client-fingerprint: chrome
     flow: xtls-rprx-vision
     network: tcp
     reality-opts:
-      public-key: ${VL_PUBKEY}
-      short-id: ${VL_SHORTID}
+      public-key: ${REALITY_PUBKEY}
+      short-id: ${REALITY_SHORTID}
     skip-cert-verify: true
-    smux:
-      enabled: true
-      protocol: h2mux
-      max-connections: 4
 
-  - name: ${NODE_H2}
+  - name: "${NODE_PREFIX} H2"
     type: hysteria2
-    server: ${SERVER}
+    server: ${DOMAIN}
     port: ${HY2_PORT}
     password: ${HY2_PASS}
-    sni: ${HY2_SNI}
+    sni: ${DOMAIN}
     skip-cert-verify: false
     udp: true
+${cdn_yaml}
 
-  - name: ${NODE_VX}
-    type: vless
-    server: ${SERVER}
-    port: ${CADDY_PORT}
-    uuid: ${XHTTP_UUID}
-    udp: true
-    tls: true
-    servername: ${SERVER}
-    network: xhttp
-    xhttp-opts:
-      path: ${XHTTP_PATH}
-      mode: auto
-    skip-cert-verify: false
-    smux:
-      enabled: true
-      protocol: h2mux
-      max-connections: 4
-YEOF
-  echo "  -> clash.yaml (Clash Verge 统一)"
-}
+proxy-groups:
+  - name: PROXY
+    type: select
+    proxies:
+      - "${NODE_PREFIX} VR"
+      - "${NODE_PREFIX} H2"
+${cdn_group}
 
-gen_loon() {
-  cat > "$SUBDIR/loon.conf" << LEOF
-${NODE_VR} = VLESS,${SERVER},${REALITY_PORT},"${LOON_VL_UUID}",transport=tcp,flow=xtls-rprx-vision,public-key="${VL_PUBKEY}",short-id=${VL_SHORTID},over-tls=true,sni=${VL_SNI},udp=true
-${NODE_H2} = Hysteria2,${SERVER},${HY2_PORT},"${HY2_PASS}",sni=${HY2_SNI},skip-cert-verify=false,udp=true
-${NODE_VX} = VLESS,${SERVER},${CADDY_PORT},"${XHTTP_UUID}",transport=xhttp,tls=true,sni=${SERVER},path=${XHTTP_PATH},udp=true
-LEOF
-  echo "  -> loon.conf (iPhone)"
-}
-
-gen_index() {
-  cat > "$SUBDIR/index.html" << IEOF
-<!DOCTYPE html><html lang="zh"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0"><title>${NODE_PREFIX}</title><style>*{margin:0;padding:0;box-sizing:border-box}body{background:#0d1117;color:#c9d1d9;font-family:-apple-system,BlinkMacSystemFont,monospace;display:flex;align-items:center;justify-content:center;min-height:100vh}.box{text-align:center}h1{color:#58a6ff;font-size:1.3em;margin-bottom:24px}a{display:block;color:#c9d1d9;text-decoration:none;padding:10px 20px;margin:8px 0;background:#161b22;border:1px solid #30363d;border-radius:6px;transition:border-color .2s}a:hover{border-color:#58a6ff}.tag{color:#8b949e;font-size:.7em;margin-left:8px}</style></head><body><div class="box"><h1>${NODE_PREFIX}</h1><a href="clash.yaml">📥 Clash Verge<span class="tag">clash.yaml</span></a><a href="loon.conf">📱 Loon (iPhone)<span class="tag">loon.conf</span></a><a href="/traffic/">📊 流量看板</a><a href="/vps-deploy.sh">🔧 部署脚本</a></div></body></html>
-IEOF
-  echo "  -> index.html (订阅门户)"
-}
-
-mkdir -p "$SUBDIR"
-echo "[gen-subs] 生成订阅文件..."
-gen_clash
-gen_loon
-gen_index
-chown -R caddy:caddy "$SUBDIR" 2>/dev/null
-echo "[gen-subs] 完成."
-ls -la "$SUBDIR"/{clash.yaml,loon.conf,index.html}
-GEOF
-    chmod +x /usr/local/bin/gen-subs.sh
-    /usr/local/bin/gen-subs.sh
-
-    info "订阅生成器已安装 (配置: /etc/vps-proxy/subs.conf)"
-}
-
-#==============================================================================
-#  ██████ Cloudflare Tunnel (cloudflared) ██████
-#==============================================================================
-install_cloudflared() {
-    step "Cloudflare Tunnel"
-
-    if [ -x /usr/bin/cloudflared ] || [ -x /usr/local/bin/cloudflared ]; then
-        if systemctl is-active --quiet cloudflared 2>/dev/null; then
-            info "cloudflared 已安装且运行中，跳过"
-            return 0
-        fi
-        info "cloudflared 已安装但未运行，重新配置..."
-    fi
-
-    echo ""
-    echo -e "${YELLOW}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-    echo -e "${YELLOW}  Cloudflare Tunnel 用于 VLESS XHTTP CDN 兜底节点${NC}"
-    echo -e "${YELLOW}  如果不需要 CDN 节点，输入 n 跳过${NC}"
-    echo -e "${YELLOW}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-    echo ""
-    # 非交互模式：有 CF_TOKEN 环境变量则自动安装，否则跳过
-    if [ -n "${CF_TOKEN_ENV:-}" ]; then
-        INSTALL_CF="y"
-    elif [ -z "$1" ] || [ -z "$2" ]; then
-        read -p "  是否安装 Cloudflare Tunnel? [Y/n]: " INSTALL_CF
-        [ -z "$INSTALL_CF" ] && INSTALL_CF="y"
-    else
-        warn "非交互模式且无 CF_TOKEN_ENV，跳过 Cloudflare Tunnel"
-        return 0
-    fi
-
-    if [ "$INSTALL_CF" = "n" ] || [ "$INSTALL_CF" = "N" ]; then
-        info "已跳过 Cloudflare Tunnel（VMess CDN 节点将不可用）"
-        return 0
-    fi
-
-    # 安装 cloudflared（如果尚未安装）
-    if [ ! -x /usr/bin/cloudflared ] && [ ! -x /usr/local/bin/cloudflared ]; then
-        info "正在安装 cloudflared..."
-        local CF_ARCH
-        case "$(uname -m)" in
-            aarch64) CF_ARCH="arm64" ;;
-            armv7l)  CF_ARCH="arm" ;;
-            *)       CF_ARCH="amd64" ;;
-        esac
-        curl -sL --retry 3 --max-time 120 -o /tmp/cloudflared.deb \
-            "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-${CF_ARCH}.deb"
-        if [ -s /tmp/cloudflared.deb ]; then
-            dpkg -i /tmp/cloudflared.deb > /dev/null 2>&1 || true
-        fi
-        rm -f /tmp/cloudflared.deb
-
-        if [ ! -x /usr/bin/cloudflared ] && [ ! -x /usr/local/bin/cloudflared ]; then
-            warn "cloudflared 安装失败，跳过（CDN 节点不可用）"
-            return 0
-        fi
-        info "cloudflared 已安装"
-    fi
-
-    # 提取根域名用于提示
-    CF_ROOT_DOMAIN=$(echo "$DOMAIN" | awk -F. '{if(NF>=2) print $(NF-1)"."$NF}')
-    [ -z "$CF_ROOT_DOMAIN" ] && CF_ROOT_DOMAIN="$DOMAIN"
-    CF_CDN_SUB="cdn-$(echo "$DOMAIN" | cut -d. -f1)"
-
-    echo ""
-    echo -e "${GREEN}请按以下步骤获取 Token：${NC}"
-    echo ""
-    echo "  1️⃣  打开 https://one.dash.cloudflare.com/"
-    echo "  2️⃣  Networks → Tunnels → Create a tunnel"
-    echo "  3️⃣  Tunnel 名称建议: ${CF_CDN_SUB}"
-    echo "  4️⃣  选择 Debian 环境，页面会显示类似命令："
-    echo "     sudo cloudflared service install eyJh...长字符串..."
-    echo "  5️⃣  只复制那个 eyJ 开头的长 Token，粘贴到下面"
-    echo ""
-    echo "  创建后进入 Tunnel → Configure → Public Hostname："
-    echo "    Subdomain: ${CF_CDN_SUB}"
-    echo "    Domain:    ${CF_ROOT_DOMAIN}"
-    echo "    Type:      HTTP"
-    echo "    URL:       localhost:10001"
-    echo ""
-    echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-    echo -e "${CYAN}  请粘贴 Token（eyJ 开头的那一串）：${NC}"
-    echo -e "${CYAN}  输入 n 跳过${NC}"
-
-    # 非交互模式优先用环境变量
-    if [ -n "${CF_TOKEN_ENV:-}" ]; then
-        CF_TOKEN="$CF_TOKEN_ENV"
-        info "使用 CF_TOKEN_ENV 环境变量"
-    else
-        read -p "  > " CF_TOKEN
-    fi
-
-    if [ "$CF_TOKEN" = "n" ] || [ "$CF_TOKEN" = "N" ] || [ -z "$CF_TOKEN" ]; then
-        warn "已跳过 Cloudflare Tunnel（VMess CDN 节点将不可用）"
-        return 0
-    fi
-
-    # 自动提取 eyJ 开头的 Token（忽略前面的无效内容）
-    CF_TOKEN=$(echo "$CF_TOKEN" | grep -oP 'eyJ[A-Za-z0-9_\-+/=\.]+' | head -1)
-    if [ -z "$CF_TOKEN" ]; then
-        warn "未识别到有效 Token（应以 eyJ 开头）"
-        read -p "  未识别到 Token，跳过 Tunnel 安装? [y/N]: " CF_SKIP
-        if [ "$CF_SKIP" = "y" ] || [ "$CF_SKIP" = "Y" ]; then
-            warn "已跳过 Cloudflare Tunnel"
-            return 0
-        fi
-        read -p "  请重新粘贴 Token: " CF_TOKEN
-        CF_TOKEN=$(echo "$CF_TOKEN" | grep -oP 'eyJ[A-Za-z0-9_\-+/=\.]+' | head -1)
-        if [ -z "$CF_TOKEN" ]; then
-            warn "仍然未识别，跳过 Cloudflare Tunnel"
-            return 0
-        fi
-    fi
-    info "已识别 Token: ${CF_TOKEN:0:20}..."
-
-    # 注册服务
-    cloudflared service install "$CF_TOKEN" > /dev/null 2>&1
-
-    if systemctl is-active --quiet cloudflared 2>/dev/null; then
-        info "Cloudflare Tunnel 已启动 ✅"
-    else
-        warn "Tunnel 未启动，检查 Token 是否正确: systemctl status cloudflared"
-    fi
-
-    # ⚠️ 强提醒：手动配置 Public Hostname
-    echo ""
-    echo -e "${RED}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-    echo -e "${RED}  ⚠️  还没完！请立即在 Cloudflare 完成以下手动操作：${NC}"
-    echo -e "${RED}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-    echo ""
-    echo -e "  🔗 ${CYAN}https://one.dash.cloudflare.com/${NC}"
-    echo -e "  📍 Networks → Tunnels → 点击刚创建的隧道 → Configure"
-    echo -e "  📍 Public Hostname → Add a public hostname"
-    echo ""
-    echo -e "  ${GREEN}填写以下内容：${NC}"
-    echo -e "    Subdomain : ${CYAN}${CF_CDN_SUB}${NC}"
-    echo -e "    Domain    : ${CYAN}${CF_ROOT_DOMAIN}${NC}"
-    echo -e "    Type      : ${CYAN}HTTP${NC}"
-    echo -e "    URL       : ${RED}localhost:10001${NC}"
-    echo ""
-    echo -e "${RED}  ⚠️  不完成这一步，CDN 节点永远不会通！${NC}"
-    echo ""
-    # 非交互模式跳过确认
-    if [ -z "${CF_TOKEN_ENV:-}" ]; then
-        read -p "  已完成上述手动配置? [按回车继续] " _DUMMY
-    fi
-}
-
-#==============================================================================
-#  ██████ fail2ban ██████
-#==============================================================================
-install_fail2ban() {
-    step "安装 fail2ban"
-
-    apt-get install -y -qq fail2ban rsyslog > /dev/null 2>&1
-    systemctl enable --now rsyslog > /dev/null 2>&1 || true
-
-    # Xray reject 过滤器
-    cat > /etc/fail2ban/filter.d/xray-reject.conf << EOF
-[Definition]
-failregex = ^.*from <HOST>.*rejected.*$
-ignoreregex =
+rules:
+  - MATCH,PROXY
 EOF
 
-    cat > /etc/fail2ban/jail.local << EOF
+    cat > "$sub_dir/loon.conf" <<EOF
+${NODE_PREFIX} VR = VLESS,${DOMAIN},${REALITY_PORT},"${VR_LOON_UUID}",transport=tcp,flow=xtls-rprx-vision,public-key="${REALITY_PUBKEY}",short-id=${REALITY_SHORTID},over-tls=true,sni=${REALITY_SNI},skip-cert-verify=true,udp=true
+${NODE_PREFIX} H2 = Hysteria2,${DOMAIN},${HY2_PORT},"${HY2_PASS}",sni=${DOMAIN},skip-cert-verify=false,udp=true
+${loon_ws}
+EOF
+
+    cat > "$sub_dir/index.html" <<EOF
+<!doctype html><html lang="zh"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="robots" content="noindex,nofollow"><title>${NODE_PREFIX}</title><style>body{max-width:38rem;margin:4rem auto;padding:1rem;background:#0d1117;color:#c9d1d9;font-family:system-ui}a{display:block;margin:.8rem 0;padding:1rem;color:#58a6ff;background:#161b22;border:1px solid #30363d;border-radius:.5rem;text-decoration:none}</style></head><body><h1>${NODE_PREFIX}</h1><a href="clash.yaml">Clash Verge 配置</a><a href="loon.conf">Loon 配置</a><a href="traffic/">流量看板</a></body></html>
+EOF
+
+    if $ENABLE_CDN && command -v getent >/dev/null 2>&1 && getent group caddy >/dev/null; then
+        chown -R root:caddy "$sub_dir"
+        find "$sub_dir" -type d -exec chmod 0750 {} +
+        find "$sub_dir" -type f -exec chmod 0640 {} +
+    else
+        chmod 0700 "$sub_dir"
+        chmod 0600 "$sub_dir/clash.yaml" "$sub_dir/loon.conf" "$sub_dir/index.html"
+    fi
+}
+
+install_traffic_dashboard() {
+    local iface sub_traffic iface_quoted traffic_root_quoted sub_traffic_quoted
+    iface=$(ip -o route show to default | awk '{print $5; exit}')
+    [[ -n "$iface" ]] || iface="eth0"
+    sub_traffic="${SUB_ROOT}/${SUB_TOKEN}/traffic"
+    install -d -m 0750 "$TRAFFIC_ROOT" "$sub_traffic"
+    vnstat --add -i "$iface" >/dev/null 2>&1 || true
+    systemctl enable --now vnstat.service >/dev/null 2>&1 || warn "vnstat 服务未启动"
+
+    printf -v iface_quoted '%q' "$iface"
+    printf -v traffic_root_quoted '%q' "$TRAFFIC_ROOT"
+    printf -v sub_traffic_quoted '%q' "$sub_traffic"
+
+    cat > /usr/local/bin/vps-proxy-traffic.sh <<EOF
+#!/usr/bin/env bash
+set -u
+iface=${iface_quoted}
+out=${traffic_root_quoted}
+published=${sub_traffic_quoted}
+mkdir -p "\$out" "\$published"
+vnstati -i "\$iface" -h -o "\$out/hourly.png" >/dev/null 2>&1 || true
+vnstati -i "\$iface" -d -o "\$out/daily.png" >/dev/null 2>&1 || true
+vnstati -i "\$iface" -m -o "\$out/monthly.png" >/dev/null 2>&1 || true
+vnstati -i "\$iface" -s -o "\$out/summary.png" >/dev/null 2>&1 || true
+cp -f "\$out"/*.png "\$published"/ 2>/dev/null || true
+cat > "\$published/index.html" <<HTML
+<!doctype html><html lang="zh"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="robots" content="noindex,nofollow"><title>流量看板</title><style>body{max-width:70rem;margin:auto;padding:1rem;background:#0d1117;color:#c9d1d9;font-family:system-ui}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:1rem}img{max-width:100%;background:#161b22;border:1px solid #30363d}</style></head><body><h1>流量看板</h1><p>网卡：\$iface · 更新时间：\$(date '+%F %T')</p><div class="grid"><img src="summary.png"><img src="hourly.png"><img src="daily.png"><img src="monthly.png"></div></body></html>
+HTML
+EOF
+    chmod 0755 /usr/local/bin/vps-proxy-traffic.sh
+    /usr/local/bin/vps-proxy-traffic.sh
+    printf '%s\n' '*/5 * * * * root /usr/local/bin/vps-proxy-traffic.sh' > /etc/cron.d/vps-proxy-traffic
+    chmod 0644 /etc/cron.d/vps-proxy-traffic
+    if $ENABLE_CDN; then
+        chown -R root:caddy "$sub_traffic"
+        find "$sub_traffic" -type d -exec chmod 0750 {} +
+        find "$sub_traffic" -type f -exec chmod 0640 {} +
+    else
+        chmod -R go-rwx "$sub_traffic"
+    fi
+}
+
+setup_fail2ban() {
+    install -d -m 0755 /etc/fail2ban/jail.d
+    cat > /etc/fail2ban/jail.d/vps-proxy.local <<EOF
 [sshd]
 enabled = true
 port = ${SSH_PORT}
 backend = systemd
 maxretry = 3
-bantime = 3600
-findtime = 600
-
-[xray-reject]
-enabled = true
-port = ${REALITY_PORT},${CADDY_PORT}
-filter = xray-reject
-logpath = /var/log/syslog
-maxretry = 5
-bantime = 3600
-findtime = 300
-
-[DEFAULT]
+findtime = 10m
+bantime = 1h
 bantime.increment = true
 bantime.factor = 2
-bantime.maxtime = 86400
+bantime.maxtime = 1d
 EOF
-
-    systemctl enable --now fail2ban > /dev/null 2>&1
-    systemctl is-active --quiet fail2ban && info "fail2ban 已启动 (SSH + Xray 防护)" || warn "fail2ban 启动失败，检查日志"
-}
-
-#==============================================================================
-#  ██████ SSH 配置 ██████
-#==============================================================================
-setup_ssh() {
-    # 只有用户选择了修改端口才执行
-    if [ "$SSH_PORT" = "$SSH_OLD_PORT" ]; then
-        echo -e "\n${CYAN}==== SSH 端口 ====${NC}"
-        info "SSH 端口保持 ${SSH_PORT}，未修改"
-        return 0
-    fi
-
-    echo ""
-    echo -e "${RED}╔══════════════════════════════════════════════════════════════╗${NC}"
-    echo -e "${RED}║                                                            ║${NC}"
-    echo -e "${RED}║  ⚠️⚠️⚠️  SSH 端口即将修改: ${SSH_OLD_PORT} → ${SSH_PORT}  ⚠️⚠️⚠️                ║${NC}"
-    echo -e "${RED}║                                                            ║${NC}"
-    echo -e "${RED}║  当前会话使用端口 ${SSH_OLD_PORT}，修改后请勿关闭本窗口！              ║${NC}"
-    echo -e "${RED}║  立即打开新终端窗口测试新端口连接：                        ║${NC}"
-    echo -e "${RED}║                                                            ║${NC}"
-    echo -e "${RED}║  ssh $(whoami)@$(curl -s4 ifconfig.me 2>/dev/null || echo 'YOUR_IP') -p ${SSH_PORT}                         ║${NC}"
-    echo -e "${RED}║                                                            ║${NC}"
-    echo -e "${RED}║  确认新端口可连接后，在本窗口执行:                         ║${NC}"
-    echo -e "${RED}║  sudo systemctl restart sshd                              ║${NC}"
-    echo -e "${RED}║                                                            ║${NC}"
-    echo -e "${RED}╚══════════════════════════════════════════════════════════════╝${NC}"
-    echo ""
-
-    # 备份并修改
-    cp /etc/ssh/sshd_config /etc/ssh/sshd_config.bak.$(date +%Y%m%d) 2>/dev/null || true
-    if grep -q "^Port" /etc/ssh/sshd_config; then
-        sed -i "s/^Port.*/Port ${SSH_PORT}/" /etc/ssh/sshd_config
-    else
-        echo "Port ${SSH_PORT}" >> /etc/ssh/sshd_config
-    fi
-    info "SSH 配置文件已修改（sshd 未重启，旧端口仍生效）"
-    warn "请确认新端口可用后再重启 sshd！"
-}
-
-# 安全加固（SSH 硬ening + 清理无用用户）
-harden_ssh() {
-    # 仅在 root 有 SSH 密钥时才加固（避免锁死）
-    if [ -s /root/.ssh/authorized_keys ]; then
-        info "SSH 安全加固..."
-        # 禁用密码登录 + root 密码登录
-        sed -i 's/^#\?PermitRootLogin.*/PermitRootLogin prohibit-password/' /etc/ssh/sshd_config
-        sed -i 's/^#\?PasswordAuthentication.*/PasswordAuthentication no/' /etc/ssh/sshd_config
-        sed -i 's/^#\?ChallengeResponseAuthentication.*/ChallengeResponseAuthentication no/' /etc/ssh/sshd_config
-        sed -i 's/^#\?X11Forwarding.*/X11Forwarding no/' /etc/ssh/sshd_config
-        grep -q "^MaxAuthTries" /etc/ssh/sshd_config || echo "MaxAuthTries 3" >> /etc/ssh/sshd_config
-        grep -q "^ClientAliveInterval" /etc/ssh/sshd_config || echo "ClientAliveInterval 60" >> /etc/ssh/sshd_config
-        # 不重启 sshd（由用户手动确认新端口后再重启，避免锁死）
-        info "SSH 配置已加固（sshd 未重启，当前会话不受影响）"
-        info "  请手动执行: systemctl restart sshd (确认新端口可用后)"
-    else
-        warn "未检测到 SSH 密钥，跳过加固（避免锁死）"
-    fi
-
-    # 删除无密钥的 ubuntu 用户（cloud-init 遗留，NOPASSWD sudo）
-    if id ubuntu >/dev/null 2>&1 && [ ! -s /home/ubuntu/.ssh/authorized_keys ]; then
-        userdel -r ubuntu 2>/dev/null && info "已删除无用 ubuntu 用户"
-        rm -f /etc/sudoers.d/90-cloud-init-users 2>/dev/null
+    if ! systemctl enable --now fail2ban.service >/dev/null 2>&1; then
+        warn "fail2ban 启动失败；不影响代理，但应检查 journalctl -u fail2ban"
+    elif ! systemctl restart fail2ban.service >/dev/null 2>&1; then
+        warn "fail2ban 重载失败；不影响代理，但应检查 journalctl -u fail2ban"
     fi
 }
 
-#==============================================================================
-#  ██████ 摘要输出 ██████
-#==============================================================================
-print_summary() {
-    SERVER_IP=$(curl -s4 ifconfig.me 2>/dev/null || echo "未知")
-    SUB_TOKEN=$(cat /etc/vps-proxy/sub-token 2>/dev/null || echo "default")
-
-    echo ""
-    echo -e "${BLUE}╔══════════════════════════════════════════════════════════╗${NC}"
-    echo -e "${BLUE}║${NC}         ${GREEN}✅ 部署完成！${NC}                              ${BLUE}║${NC}"
-    echo -e "${BLUE}╠══════════════════════════════════════════════════════════╣${NC}"
-    echo -e "${BLUE}║${NC} 服务器 IP: ${CYAN}${SERVER_IP}${NC}"
-    echo -e "${BLUE}║${NC} 域名:      ${CYAN}${DOMAIN}${NC}"
-    echo -e "${BLUE}╠══════════════════════════════════════════════════════════╣${NC}"
-    echo -e "${BLUE}║${NC} 协议端口:                                             ${BLUE}║${NC}"
-    echo -e "${BLUE}║${NC}   VLESS Reality  TCP:${REALITY_PORT}                         ${BLUE}║${NC}"
-    echo -e "${BLUE}║${NC}   Hysteria2      UDP:${HY2_PORT}                          ${BLUE}║${NC}"
-    echo -e "${BLUE}║${NC}   VLESS XHTTP    TCP:${CADDY_PORT} (via Caddy)             ${BLUE}║${NC}"
-    echo -e "${BLUE}╠══════════════════════════════════════════════════════════╣${NC}"
-    echo -e "${BLUE}║${NC} 订阅链接:                                             ${BLUE}║${NC}"
-    echo -e "${BLUE}║${NC}   ${CYAN}http://${DOMAIN}:${CADDY_PORT}/${SUB_TOKEN}/clash.yaml${NC}"
-    echo -e "${BLUE}║${NC}   ${CYAN}http://${DOMAIN}:${CADDY_PORT}/${SUB_TOKEN}/loon.conf${NC}"
-    echo -e "${BLUE}╠══════════════════════════════════════════════════════════╣${NC}"
-    echo -e "${BLUE}║${NC} 流量看板:                                             ${BLUE}║${NC}"
-    echo -e "${BLUE}║${NC}   ${CYAN}http://${DOMAIN}:${CADDY_PORT}/traffic/${NC}"
-    echo -e "${BLUE}╠══════════════════════════════════════════════════════════╣${NC}"
-    echo -e "${BLUE}║${NC} 节点命名:                                             ${BLUE}║${NC}"
-    echo -e "${BLUE}║${NC}   ${NODE_PREFIX} ${PROTO_VR}                                     ${BLUE}║${NC}"
-    echo -e "${BLUE}║${NC}   ${NODE_PREFIX} ${PROTO_H2}                                     ${BLUE}║${NC}"
-    echo -e "${BLUE}║${NC}   ${NODE_PREFIX} ${PROTO_VX}                                     ${BLUE}║${NC}"
-    echo -e "${BLUE}╠══════════════════════════════════════════════════════════╣${NC}"
-    echo -e "${BLUE}║${NC} 维护命令:                                             ${BLUE}║${NC}"
-    echo -e "${BLUE}║${NC}   改配置: vim /usr/local/bin/gen-subs.sh               ${BLUE}║${NC}"
-    echo -e "${BLUE}║${NC}   重建订阅: /usr/local/bin/gen-subs.sh                 ${BLUE}║${NC}"
-    echo -e "${BLUE}║${NC}   服务状态: systemctl status xray hysteria-server caddy${BLUE}║${NC}"
-    echo -e "${BLUE}╚══════════════════════════════════════════════════════════╝${NC}"
-
-    # 报告被释放的端口
-    if [ -n "$KILLED_PORTS" ]; then
-        echo ""
-        echo -e "${YELLOW}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-        echo -e "${YELLOW}  ⚠️  脚本运行期间释放了以下端口：${NC}"
-        echo -e "${YELLOW}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-        echo -e "$KILLED_PORTS"
-        echo -e "${YELLOW}  如上述端口原运行着重要服务，请手动恢复。${NC}"
-    fi
-    echo ""
+free_local_tcp_port() {
+    python3 - <<'PY'
+import socket
+with socket.socket() as sock:
+    sock.bind(('127.0.0.1', 0))
+    print(sock.getsockname()[1])
+PY
 }
 
-#==============================================================================
-#  ██████ 主流程 ██████
-#==============================================================================
-main() {
-    TOTAL=14; STEP=0
+wait_for_socks() {
+    local port=$1
+    for _ in $(seq 1 20); do
+        ss -H -ltn "sport = :$port" 2>/dev/null | grep -q . && return 0
+        sleep 0.25
+    done
+    return 1
+}
 
-    # ── 1. 配置 ──
-    setup_config "$@"
-
-    # SUB_TOKEN 持久化（仅在首次创建，避免每次重跑轮换）
-    mkdir -p /etc/vps-proxy
-    [ -f /etc/vps-proxy/sub-token ] || echo "${SUB_TOKEN}" > /etc/vps-proxy/sub-token
-
-    # ── 2. 检测 ──
-    check_system
-    auto_detect_region
-
-    # ── 3. 系统优化 ──
-    optimize_system
-
-    # ── 4. 依赖 ──
-    install_deps
-
-    # ── 5. 密钥（已存在则复用，但先验证有效性）──
-    if [ -f /etc/vps-proxy/subs.conf ]; then
-        step "密钥生成"
-        source /etc/vps-proxy/subs.conf
-        # 从独立变量重建 VL_UUIDS 数组（subs.conf 持久化为 VL_UUIDS_0/1/2）
-        if [ -z "${VL_UUIDS:-}" ]; then
-            if [ -n "${VL_UUIDS_0:-}" ]; then
-                VL_UUIDS=("${VL_UUIDS_0}" "${VL_UUIDS_1:-}" "${VL_UUIDS_2:-}")
-                [ -z "${VL_UUID:-}" ] && VL_UUID="${VL_UUIDS_0}"
-                [ -z "${LOON_VL_UUID:-}" ] && LOON_VL_UUID="${VL_UUIDS_2:-${VL_UUIDS_0}}"
-            fi
-        fi
-        # 验证 UUID 是否有效
-        if [ -z "${VL_UUIDS:-}" ] || [ -z "${VL_UUIDS[0]:-}" ]; then
-            warn "旧配置的 UUID 无效，重新生成密钥"
-            rm -f /etc/vps-proxy/subs.conf
-            generate_keys
-        else
-            info "检测到已有配置，复用密钥 (VL: ${VL_UUIDS[0]:0:8}...)"
-            # 复用 SUB_TOKEN（避免订阅 URL 变化）
-            SUB_TOKEN="${SUB_TOKEN:-$(cat /etc/vps-proxy/sub-token 2>/dev/null || echo "default")}"
-            SERVER="${DOMAIN}"
-            # 旧配置迁移: VMESS_UUID → XHTTP_UUID
-            if [ -z "${XHTTP_UUID:-}" ] && [ -n "${VMESS_UUID:-}" ]; then
-                XHTTP_UUID="${VMESS_UUID}"
-                XHTTP_PATH="/$(echo "$XHTTP_UUID" | cut -d- -f1)-xhttp"
-                info "已从旧 VMess 配置迁移到 VLESS XHTTP"
-                warn "⚠️  CDN Tunnel Public Hostname 路径可能仍指向旧的 VMess WS 路径"
-                warn "    请在 Cloudflare 手动更新: Tunnel → Public Hostname → URL 改为 localhost:10001"
-            elif [ -z "${XHTTP_UUID:-}" ]; then
-                XHTTP_UUID=$(cat /proc/sys/kernel/random/uuid)
-                XHTTP_PATH="/$(echo "$XHTTP_UUID" | cut -d- -f1)-xhttp"
-                info "生成新的 VLESS XHTTP UUID"
-            fi
-        fi
-    else
-        generate_keys
+test_via_socks() {
+    local port=$1 result
+    result=$(curl -fsS --noproxy '' --connect-timeout 8 --max-time 20 \
+        --socks5-hostname "127.0.0.1:${port}" https://api.ipify.org 2>/dev/null || true)
+    if ! valid_ip_literal "$result"; then
+        result=$(curl -fsS --noproxy '' --connect-timeout 8 --max-time 20 \
+            --socks5-hostname "127.0.0.1:${port}" https://www.cloudflare.com/cdn-cgi/trace 2>/dev/null |
+            awk -F= '$1 == "ip" {print $2; exit}' || true)
     fi
+    valid_ip_literal "$result" && printf '%s' "$result"
+}
 
-    # ── 6. 防火墙 ──
-    setup_firewall
+valid_ip_literal() {
+    python3 - "$1" <<'PY'
+import ipaddress
+import sys
+try:
+    ipaddress.ip_address(sys.argv[1])
+except ValueError:
+    raise SystemExit(1)
+PY
+}
 
-    # ── 7. Xray ──
-    XRAY_OK=true
-    if [ -x /usr/local/bin/xray ] && [ -f /usr/local/etc/xray/config.json ]; then
-        step "安装 Xray"
-        info "Xray 已安装，更新配置..."
-        install_xray_config_only || XRAY_OK=false
-    else
-        install_xray || XRAY_OK=false
-    fi
-    if ! $XRAY_OK; then
-        err "Xray 安装/更新失败，代理核心不可用！"
-        warn "后续步骤将继续执行，但 VLESS 节点将不可用"
-    fi
+render_reality_client_config() {
+    local config=$1 port=$2
+    cat > "$config" <<EOF
+{
+  "log": {"loglevel": "warning"},
+  "inbounds": [{"listen": "127.0.0.1", "port": ${port}, "protocol": "socks", "settings": {"udp": true}}],
+  "outbounds": [{
+    "protocol": "vless",
+    "settings": {"vnext": [{"address": "${XRAY_TEST_ADDRESS:-127.0.0.1}", "port": 443, "users": [{"id": "${VR_CLASH_UUID}", "encryption": "none", "flow": "xtls-rprx-vision"}]}]},
+    "streamSettings": {"network": "raw", "security": "reality", "realitySettings": {"serverName": "${REALITY_SNI}", "fingerprint": "chrome", "password": "${REALITY_PUBKEY}", "shortId": "${REALITY_SHORTID}"}}
+  }]
+}
+EOF
+}
 
-    # ── 8. Hysteria2 ──
-    if [ -x /usr/local/bin/hysteria ]; then
-        step "安装 Hysteria2"
-        info "Hysteria2 已安装，更新配置..."
-        # 重写配置（域名可能已变更）
-        install_hysteria_config_only
-    else
-        install_hysteria
-    fi
-
-    # ── 9. Caddy ──
-    if [ -x /usr/bin/caddy ]; then
-        step "安装 Caddy"
-        info "Caddy 已安装，更新 Caddyfile..."
-        # 确保订阅目录存在
-        mkdir -p /var/lib/subscription/${SUB_TOKEN} /var/lib/traffic-monitor
-        # 更新 Caddyfile（协议路径可能已变更）
-        cat > /etc/caddy/Caddyfile << CEOF
-http://${DOMAIN}:${CADDY_PORT} {
-    root * /var/lib/subscription
-    file_server
-
-    handle_path /traffic/* {
-        root * /var/lib/traffic-monitor
-        file_server
+render_xhttp_client_config() {
+    local config=$1 port=$2
+    cat > "$config" <<EOF
+{
+  "log": {"loglevel": "warning"},
+  "inbounds": [{"listen": "127.0.0.1", "port": ${port}, "protocol": "socks", "settings": {"udp": true}}],
+  "outbounds": [{
+    "protocol": "vless",
+    "settings": {"vnext": [{"address": "${CDN_DOMAIN}", "port": 443, "users": [{"id": "${XHTTP_UUID}", "encryption": "none"}]}]},
+    "streamSettings": {
+      "network": "xhttp",
+      "security": "tls",
+      "tlsSettings": {"serverName": "${CDN_DOMAIN}", "fingerprint": "chrome", "alpn": ["h2"]},
+      "xhttpSettings": {"host": "${CDN_DOMAIN}", "path": "${XHTTP_PATH}", "mode": "packet-up"}
     }
-
-    handle ${XHTTP_PATH} {
-        reverse_proxy 127.0.0.1:${XHTTP_PORT}
-    }
+  }]
 }
-CEOF
-        systemctl reload caddy 2>/dev/null || systemctl restart caddy
-        systemctl is-active --quiet caddy && info "Caddy 配置已更新 ✅" || warn "Caddy 重载失败"
-    else
-        install_caddy
-    fi
+EOF
+}
 
-    # ── 10. Cloudflare Tunnel ──
-    install_cloudflared
+render_ws_client_config() {
+    local config=$1 port=$2
+    cat > "$config" <<EOF
+{
+  "log": {"loglevel": "warning"},
+  "inbounds": [{"listen": "127.0.0.1", "port": ${port}, "protocol": "socks", "settings": {"udp": true}}],
+  "outbounds": [{
+    "protocol": "vless",
+    "settings": {"vnext": [{"address": "${CDN_DOMAIN}", "port": 443, "users": [{"id": "${WS_UUID}", "encryption": "none"}]}]},
+    "streamSettings": {
+      "network": "websocket",
+      "security": "tls",
+      "tlsSettings": {"serverName": "${CDN_DOMAIN}", "fingerprint": "chrome", "alpn": ["http/1.1"]},
+      "wsSettings": {"host": "${CDN_DOMAIN}", "path": "${WS_PATH}"}
+    }
+  }]
+}
+EOF
+}
 
-    # ── 11. 流量监控 ──
-    if [ -x /usr/bin/vnstat ]; then
-        step "流量监控"
-        info "vnstat 已安装，跳过"
-    else
-        install_vnstat
-    fi
+run_xray_socks_test() {
+    local config=$1 port=$2 log=$3 pid result
+    /usr/local/bin/xray run -test -config "$config" >/dev/null
+    /usr/local/bin/xray run -config "$config" >"$log" 2>&1 &
+    pid=$!
+    CHILD_PIDS+=("$pid")
+    wait_for_socks "$port" || {
+        sed -n '1,80p' "$log" >&2
+        return 1
+    }
+    result=$(test_via_socks "$port" || true)
+    kill "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+    unregister_child_pid "$pid"
+    valid_ip_literal "$result"
+}
 
-    # ── 12. 订阅生成器 ──
-    install_sub_generator
+selftest_reality() {
+    local temp_dir config port
+    port=$(free_local_tcp_port)
+    new_temp_dir
+    temp_dir=$NEW_TEMP_DIR
+    config="$temp_dir/reality-client.json"
+    render_reality_client_config "$config" "$port"
+    run_xray_socks_test "$config" "$port" "$temp_dir/client.log"
+}
 
-    # ── 13. fail2ban ──
-    if systemctl is-active --quiet fail2ban 2>/dev/null; then
-        step "fail2ban"
-        info "fail2ban 已运行，跳过"
-    else
-        install_fail2ban
-    fi
+selftest_xhttp() {
+    local temp_dir config port
+    port=$(free_local_tcp_port)
+    new_temp_dir
+    temp_dir=$NEW_TEMP_DIR
+    config="$temp_dir/xhttp-client.json"
+    render_xhttp_client_config "$config" "$port"
+    run_xray_socks_test "$config" "$port" "$temp_dir/client.log"
+}
 
-    # ── 检查 ──
-    step "服务状态检查"
-    for svc in xray hysteria-server caddy cloudflared fail2ban vnstat; do
-        if systemctl is-active --quiet $svc 2>/dev/null; then
-            info "$svc ✅"
+selftest_ws() {
+    local temp_dir config port
+    port=$(free_local_tcp_port)
+    new_temp_dir
+    temp_dir=$NEW_TEMP_DIR
+    config="$temp_dir/ws-client.json"
+    render_ws_client_config "$config" "$port"
+    run_xray_socks_test "$config" "$port" "$temp_dir/client.log"
+}
+
+selftest_hysteria() {
+    local temp_dir config port pid result hy2_address
+    port=$(free_local_tcp_port)
+    new_temp_dir
+    temp_dir=$NEW_TEMP_DIR
+    config="$temp_dir/hysteria-client.yaml"
+    hy2_address=${XRAY_TEST_ADDRESS:-127.0.0.1}
+    [[ "$hy2_address" == *:* ]] && hy2_address="[${hy2_address}]"
+    cat > "$config" <<EOF
+server: ${hy2_address}:${HY2_PORT}
+auth: ${HY2_PASS}
+tls:
+  sni: ${DOMAIN}
+  insecure: false
+socks5:
+  listen: 127.0.0.1:${port}
+EOF
+    /usr/local/bin/hysteria client -c "$config" >"$temp_dir/client.log" 2>&1 &
+    pid=$!
+    CHILD_PIDS+=("$pid")
+    wait_for_socks "$port" || {
+        sed -n '1,80p' "$temp_dir/client.log" >&2
+        return 1
+    }
+    result=$(test_via_socks "$port" || true)
+    kill "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+    unregister_child_pid "$pid"
+    valid_ip_literal "$result"
+}
+
+health_check() {
+    local failed=false service
+    CDN_READY=false
+    info "执行服务与真实协议验收"
+    for service in xray hysteria-server; do
+        if systemctl is-active --quiet "$service"; then
+            info "${service}：active"
         else
-            warn "$svc ❌ (检查: journalctl -u $svc --no-pager -n 20)"
+            err "${service}：inactive"
+            failed=true
         fi
     done
-
-    # ── 摘要 ──
-    print_summary
-
-    # ── 14. SSH 端口（所有工作完成后，最后处理）──
-    setup_ssh
-
-    # ── 15. SSH 安全加固（密钥确认后再执行）──
-    harden_ssh
-
-    # 安全兜底：确保被暂停的服务都已恢复
-    _restore_ports
+    if $ENABLE_CDN; then
+        for service in caddy cloudflared; do
+            if systemctl is-active --quiet "$service"; then
+                info "${service}：active"
+            else
+                err "${service}：inactive"
+                failed=true
+            fi
+        done
+        if ! ss -H -ltn "sport = :${CADDY_ORIGIN_PORT}" | grep -Fq "127.0.0.1:${CADDY_ORIGIN_PORT}"; then
+            err "Caddy 未按预期仅监听 127.0.0.1:${CADDY_ORIGIN_PORT}"
+            failed=true
+        fi
+        if ! ss -H -ltn "sport = :${XHTTP_PORT}" | grep -Fq "127.0.0.1:${XHTTP_PORT}"; then
+            err "XHTTP 未按预期仅监听 127.0.0.1:${XHTTP_PORT}"
+            failed=true
+        fi
+        if ! ss -H -ltn "sport = :${WS_PORT}" | grep -Fq "127.0.0.1:${WS_PORT}"; then
+            err "WebSocket 未按预期仅监听 127.0.0.1:${WS_PORT}"
+            failed=true
+        fi
+    fi
+    XRAY_LOCATION_ASSET=/usr/local/share/xray \
+        /usr/local/bin/xray run -test -config /usr/local/etc/xray/config.json >/dev/null || failed=true
+    ss -H -ltn "sport = :443" | grep -q . || failed=true
+    ss -H -lun "sport = :443" | grep -q . || failed=true
+    if selftest_reality; then
+        info "VLESS Reality 真实出站自测：通过"
+    else
+        err "VLESS Reality 真实出站自测：失败"
+        failed=true
+    fi
+    if selftest_hysteria; then
+        info "Hysteria2 真实出站自测：通过"
+    else
+        err "Hysteria2 真实出站自测：失败"
+        failed=true
+    fi
+    if $ENABLE_CDN; then
+        if curl -fsS --noproxy '*' --max-time 8 "http://127.0.0.1:${CADDY_ORIGIN_PORT}/${SUB_TOKEN}/clash.yaml" >/dev/null; then
+            info "Caddy 本地订阅：通过"
+        else
+            err "Caddy 本地订阅：失败"
+            failed=true
+        fi
+        if curl -fsS --noproxy '*' --max-time 12 "https://${CDN_DOMAIN}/${SUB_TOKEN}/clash.yaml" >/dev/null; then
+            info "Cloudflare HTTPS 订阅：通过"
+            local cdn_protocols_ok=true
+            if selftest_xhttp; then
+                info "VLESS XHTTP/Cloudflare 真实出站自测：通过"
+            else
+                err "VLESS XHTTP/Cloudflare 真实出站自测：失败"
+                failed=true
+                cdn_protocols_ok=false
+            fi
+            if selftest_ws; then
+                info "VLESS WebSocket/Cloudflare 真实出站自测：通过"
+            else
+                err "VLESS WebSocket/Cloudflare 真实出站自测：失败"
+                failed=true
+                cdn_protocols_ok=false
+            fi
+            if $cdn_protocols_ok; then
+                CDN_READY=true
+            fi
+        else
+            warn "Cloudflare HTTPS 订阅尚不可达；请完成 Public Hostname 映射后运行 --check"
+        fi
+    fi
+    if $failed; then
+        die "关键验收失败；不要把摘要当作部署成功"
+    fi
 }
 
-# 运行
-main "$@"
+print_summary() {
+    if $ENABLE_CDN && ! ${CDN_READY:-false}; then
+        printf '\n%b直连协议部署与自测通过；CDN 等待外部配置%b\n' "$YELLOW" "$NC"
+    else
+        printf '\n%b部署与已启用协议的真实出站自测均通过%b\n' "$GREEN" "$NC"
+    fi
+    printf '  Reality：%s:443/tcp\n' "$DOMAIN"
+    printf '  Hysteria2：%s:443/udp\n' "$DOMAIN"
+    if $ENABLE_CDN; then
+        printf '  XHTTP：%s:443（Cloudflare → http://127.0.0.1:%s）\n' "$CDN_DOMAIN" "$CADDY_ORIGIN_PORT"
+        printf '  WebSocket：%s:443（Cloudflare → http://127.0.0.1:%s）\n' "$CDN_DOMAIN" "$CADDY_ORIGIN_PORT"
+        printf '  Clash：https://%s/%s/clash.yaml\n' "$CDN_DOMAIN" "$SUB_TOKEN"
+        printf '  Loon：https://%s/%s/loon.conf\n' "$CDN_DOMAIN" "$SUB_TOKEN"
+        printf '\nCloudflare Public Hostname 必须设置为：\n'
+        printf '  %s → HTTP → 127.0.0.1:%s\n' "$CDN_DOMAIN" "$CADDY_ORIGIN_PORT"
+    else
+        printf '  Clash 文件：%s/%s/clash.yaml\n' "$SUB_ROOT" "$SUB_TOKEN"
+        printf '  Loon 文件：%s/%s/loon.conf\n' "$SUB_ROOT" "$SUB_TOKEN"
+        printf '  未启用 CDN；Loon 配置只含官方支持的 Reality 与 Hysteria2。\n'
+    fi
+    printf '\n只读复检：sudo bash %s --check\n' "$0"
+    printf '说明：脚本验证协议可用性；客户端到 VPS 的 <100ms 延迟取决于物理距离和线路，无法由脚本保证。\n'
+}
+
+load_check_state() {
+    [[ -f "$STATE_FILE" ]] || die "未找到 v4 状态文件：$STATE_FILE"
+    load_state
+    DOMAIN=${STATE_DOMAIN:?}
+    PROVIDER=${STATE_PROVIDER:?}
+    EMAIL=${STATE_EMAIL:?}
+    ACME_MODE=${STATE_ACME_MODE:?}
+    CDN_DOMAIN=${STATE_CDN_DOMAIN:-}
+    COUNTRY=${STATE_COUNTRY:-XX}
+    REALITY_TARGET=${STATE_REALITY_TARGET:?}
+    REALITY_SNI=${REALITY_TARGET%:*}
+    XRAY_LISTEN=${STATE_XRAY_LISTEN:-0.0.0.0}
+    [[ "$XRAY_LISTEN" == "::" ]] && XRAY_TEST_ADDRESS="::1" || XRAY_TEST_ADDRESS="127.0.0.1"
+    FLAG=$(python3 - "$COUNTRY" <<'PY'
+import sys
+c=sys.argv[1]
+print(''.join(chr(0x1F1E6 + ord(x)-65) for x in c) if len(c)==2 and c!='XX' else '🏳️')
+PY
+)
+    NODE_PREFIX="${FLAG} ${COUNTRY} ${PROVIDER}"
+    VR_CLASH_UUID=${STATE_VR_CLASH_UUID:?}
+    VR_LOON_UUID=${STATE_VR_LOON_UUID:?}
+    HY2_PASS=${STATE_HY2_PASS:?}
+    XHTTP_UUID=${STATE_XHTTP_UUID:-}
+    XHTTP_PATH=${STATE_XHTTP_PATH:-}
+    WS_UUID=${STATE_WS_UUID:-}
+    WS_PATH=${STATE_WS_PATH:-}
+    SUB_TOKEN=${STATE_SUB_TOKEN:?}
+    REALITY_PRIVKEY=${STATE_REALITY_PRIVKEY:?}
+    REALITY_PUBKEY=${STATE_REALITY_PUBKEY:?}
+    REALITY_SHORTID=${STATE_REALITY_SHORTID:?}
+    [[ -n "$CDN_DOMAIN" ]] && ENABLE_CDN=true || ENABLE_CDN=false
+    if $ENABLE_CDN; then
+        if ! valid_uuid "$XHTTP_UUID" || ! valid_xhttp_path "$XHTTP_PATH" || \
+            ! valid_uuid "$WS_UUID" || ! valid_ws_path "$WS_PATH"; then
+            die "CDN 状态缺失或损坏；从 v4.0 升级后请先运行一次安装模式，再使用 --check"
+        fi
+    fi
+}
+
+main() {
+    parse_args "$@"
+    require_platform
+    if [[ "$MODE" == "check" ]]; then
+        load_check_state
+        health_check
+        print_summary
+        return
+    fi
+
+    load_state
+    configure_inputs
+    install_dependencies
+    detect_region
+    detect_ssh_port
+    verify_direct_dns
+    preflight_ports
+    optimize_system
+    setup_firewall
+
+    install_xray_binary
+    install_hysteria_binary
+    ensure_service_users
+    ensure_secrets
+    probe_reality_target
+    write_xray_config
+    write_hysteria_config
+    install_caddy
+    write_state
+    write_subscriptions
+    install_traffic_dashboard
+    install_cloudflared
+    # 流量看板刚写入了新文件，再次统一 Caddy 的只读权限。
+    if $ENABLE_CDN; then
+        chown -R root:caddy "${SUB_ROOT}/${SUB_TOKEN}"
+        find "${SUB_ROOT}/${SUB_TOKEN}" -type d -exec chmod 0750 {} +
+        find "${SUB_ROOT}/${SUB_TOKEN}" -type f -exec chmod 0640 {} +
+    fi
+    setup_fail2ban
+    health_check
+    print_summary
+}
+
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+    main "$@"
+fi

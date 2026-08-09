@@ -1,281 +1,239 @@
-# VPS 三协议代理一键部署
+# VPS 代理节点部署脚本
 
-**VLESS Reality + Hysteria2 + VLESS XHTTP (CDN)** 全自动部署脚本，零依赖任何 VPS。
+在一台干净的 Ubuntu/Debian VPS 上部署：
 
----
+- VLESS + XTLS Vision + REALITY（TCP 443，主力）
+- Hysteria 2（UDP 443，弱网/高吞吐）
+- 可选 VLESS XHTTP（Cloudflare Tunnel，Mihomo 备用线路）
+- 可选 VLESS WebSocket（同一 Tunnel，Loon/Mihomo CDN 备用线路）
+
+v4 的目标是可审计、可重跑、失败不伪装成成功。脚本不依赖任何既有 VPS，也不会修改 SSH 登录方式、删除用户、清空既有防火墙规则或自动杀死端口占用进程。
+
+首次部署、Cloudflare 两枚 Token、Tunnel “尚未检测到连接”、Public Hostname、Clash/Loon 导入、统一测速、更新、回滚和逐项排错，请直接阅读 **[从零部署超详细手册](MANUAL.md)**。
+
+## 支持范围
+
+| 项目 | 支持 |
+|---|---|
+| 系统 | 使用 systemd 的 Ubuntu 20.04+、Debian 11+ |
+| 架构 | x86_64/amd64、aarch64/arm64 |
+| 权限 | root（建议 `sudo bash`） |
+| 网络 | 至少一个公网 IPv4 或可直达的公网 IPv6 |
+| 域名 | 直连域名必须解析到 VPS，Cloudflare **DNS only/灰云** |
+
+容器内、非 systemd 系统、共享端口 NAT VPS、OpenVZ 内核限制环境不承诺支持。脚本会在修改系统前尽早拒绝明显不兼容的环境。
+
+## 部署前准备
+
+必需：
+
+1. 为直连节点准备域名，例如 `node.example.com`。
+2. Cloudflare DNS 中添加 A/AAAA 记录并保持灰云（DNS only）。
+3. 准备有效邮箱供 ACME 注册使用。
+
+可选 CDN（XHTTP + WebSocket）：
+
+1. 准备另一个域名，例如 `cdn.node.example.com`。
+2. 在 Cloudflare Zero Trust 创建 Tunnel，复制 `eyJ...` Token。
+3. 脚本完成后，将 Public Hostname 的服务设置为 `HTTP → 127.0.0.1:10000`。
+
+不要把直连域名开成橙云；Reality TCP 和 Hysteria UDP 必须直达 VPS。
 
 ## 快速开始
 
+先下载，再运行；不要使用未经检查的 `curl | bash`：
+
 ```bash
-curl -sLo vps-deploy.sh https://raw.githubusercontent.com/Erwin-lark/vps-proxy-deploy/main/vps-deploy.sh
+curl -fLo vps-deploy.sh \
+  https://raw.githubusercontent.com/Erwin-lark/vps-proxy-deploy/main/vps-deploy.sh
+chmod +x vps-deploy.sh
 sudo bash vps-deploy.sh
 ```
 
-非交互模式（跳过所有询问）：
-```bash
-# 基础非交互
-sudo bash vps-deploy.sh my.example.com PROVIDER email@example.com
-
-# 带 Cloudflare Tunnel
-CF_TOKEN_ENV="eyJ..." sudo -E bash vps-deploy.sh my.example.com BVL
-
-# DNS-01 证书模式（推荐，无需开 80 端口）
-ACME_MODE_ENV=dns CF_DNS_TOKEN_ENV="cfut_..." sudo -E bash vps-deploy.sh my.example.com BVL
-```
-
-断点续传：脚本中断后重新运行，已安装的服务自动跳过，密钥和证书自动复用。
-
----
-
-## 架构
-
-```
-                   ┌──────────────────────────────┐
-                   │     客户端 (Clash / Loon)      │
-                   └──────┬──────────┬─────────────┘
-                          │          │
-            ┌─────────────┼──────────┼──────────────┐
-            │ 直连 (灰云)   │          │   CDN (橙云)   │
-            │ port 443     │          │   Cloudflare   │
-            └──────┬───────┘          └──────┬────────┘
-                   │                         │
-    ┌──────────────┼──────────────┐          │
-    │ VLESS Reality│  Hysteria2   │  VLESS XHTTP CDN │
-    │ XTLS Vision  │  UDP QUIC    │  (兜底节点)       │
-    │ 低延迟 · 主力 │  高吞吐 · 弱网 │  Cloudflare Tunnel│
-    └──────────────┴──────────────┴──────────────────┘
-                   │
-            ┌──────┴──────┐
-            │ Xray + Caddy │
-            │  + vnstat    │
-            │ + fail2ban   │
-            │  (SSH+Xray)  │
-            └─────────────┘
-```
-
----
-
-## 完整流程图
-
-```
-┌─────────────────────────────────────────────────────────────────┐
-│  前置准备（在 Cloudflare 手动操作，运行脚本前完成）                │
-│                                                                 │
-│  ① 添加 DNS A 记录 (灰云)  →  域名 → VPS IP                     │
-│  ② 创建 Tunnel → 复制 Token (eyJ...)                            │
-│  ③ 配置 Public Hostname  →  cdn-xxx.域名 → localhost:10001      │
-│  ④ 添加 DNS CNAME (橙云)   →  cdn-xxx.域名 → cfargotunnel.com   │
-└─────────────────────────────┬───────────────────────────────────┘
-                              │
-                              ▼
-┌─────────────────────────────────────────────────────────────────┐
-│  运行脚本: curl + sudo bash vps-deploy.sh                        │
-└─────────────────────────────┬───────────────────────────────────┘
-                              │
-                              ▼
-╔═════════════════════════════════════════════════════════════════╗
-║  🔴 强提醒 ①：CF 前置确认                                       ║
-║  ① DNS A 记录?  ② Tunnel + Token?  ③ Public Hostname?          ║
-║  以上 3 项已完成? [y/N]                                         ║
-║  → n: 显示操作指南，循环确认                                     ║
-║  → y: 继续                                                      ║
-╠═════════════════════════════════════════════════════════════════╣
-║  🔴 强提醒 ②：端口预检                                          ║
-║  检查: 443 / 80 / 8443 / 10001                                  ║
-║  · 如被占用 → 显示进程名 → 告知将暂停并自动恢复                  ║
-║  · 如空闲 → ✓ 空闲                                               ║
-║  继续部署? [回车继续 / q 退出]                                   ║
-╠═════════════════════════════════════════════════════════════════╣
-║  输入域名 (空值循环重输 · 含格式校验)                              ║
-║  ├→ 自动识别服务商代码: GCP [回车确认 / n 重输]                 ║
-║  输入邮箱 (含@和. 否则循环重输)                                  ║
-║  当前 SSH: 22 → 建议改随机高端口? [y/N]                          ║
-╚═════════════════════════════════════════════════════════════════╝
-                              │
-                              ▼
-    ╔══════════════════════════════════════════════════╗
-    ║          🤖 自动安装 (约 3 分钟)                  ║
-    ╠══════════════════════════════════════════════════╣
-    ║  [1/14]  系统检测       OS · 内存 · root · py3   ║
-    ║  [2/14]  地区检测       国家 · 国旗 · 伪装目标    ║
-    ║  [3/14]  系统优化       BBR · TCP · keepalive    ║
-    ║  [4/14]  安装依赖       curl wget python3 ufw    ║
-    ║  [5/14]  密钥生成       UUID 复用或重新生成       ║
-    ║  [6/14]  防火墙         ufw 新旧端口双放行        ║
-    ║  [7/14]  安装 Xray      VLESS Reality + XHTTP    ║
-    ║           ├ geo 分流下载 (带重试+fallback)        ║
-    ║           ├ DNS 分流: 1.1.1.1 + 8.8.8.8         ║
-    ║           ├ 广告黑洞 + 私网阻断                   ║
-    ║  [8/14]  安装 Hysteria2  ACME 证书获取            ║
-    ║           ├ HTTP-01 模式: 临时开80→获证→关80     ║
-    ║           ├ DNS-01 模式: CF API 验证 (无需80)    ║
-    ║           ├ 轮询等证书: 最多60秒                  ║
-    ║  [9/14]  安装 Caddy     订阅门户 :8443            ║
-    ║           ├ 重跑自动更新 Caddyfile                ║
-    ╠══════════════════════════════════════════════════╣
-    ║  [10/14] 🔴 Cloudflare Tunnel                     ║
-    ║           是否安装? [Y/n] (非交互: CF_TOKEN_ENV)   ║
-    ║           粘贴 Token → 自动提取 eyJ 有效部分       ║
-    ║           🔴 红色强提醒: 确认已手动配 PH           ║
-    ╠══════════════════════════════════════════════════╣
-    ║  [11/14] 流量监控       vnstat + cron 每5分钟     ║
-    ║  [12/14] 订阅生成器     clash.yaml + loon.conf    ║
-    ║  [13/14] fail2ban       SSH防爆破 + Xray防扫描    ║
-    ║  [14/14] 服务状态检查   全部服务 ✅/❌             ║
-    ╚══════════════════════════════════════════════════╝
-                              │
-                              ▼
-    ╔══════════════════════════════════════════════════╗
-    ║          🔐 安全加固 (自动执行)                   ║
-    ╠══════════════════════════════════════════════════╣
-    ║  SSH 硬ening: 仅密钥 · 禁密码 · 禁X11 · 3次锁定 ║
-    ║  删除 ubuntu 用户 (NOPASSWD sudo)               ║
-    ║  凭证文件 chmod 600                              ║
-    ╠══════════════════════════════════════════════════╣
-    ║  SSH 端口修改 (如选择了 y)                       ║
-    ║  ⚠️ 请手动确认新端口可用后再重启 sshd            ║
-    ╚══════════════════════════════════════════════════╝
-                              │
-                              ▼
-┌─────────────────────────────────────────────────────────────────┐
-│  ✅ 部署完成                                                     │
-│                                                                 │
-│  服务器 IP · 域名 · 协议端口                                      │
-│  Clash Verge 订阅: http://域名:8443/<token>/clash.yaml           │
-│  Loon 订阅:       http://域名:8443/<token>/loon.conf             │
-│  流量看板:        http://域名:8443/traffic/                       │
-│                                                                 │
-│  📋 端口变更报告                                                  │
-│  HTTP-01 模式: 端口 80 临时开→获证→已关闭 ✅                      │
-│  DNS-01 模式: 端口 80 全程关闭 ✅                                 │
-│                                                                 │
-│  🔴 SSH 加固已写入配置 (sshd 未重启，当前会话安全)                 │
-└─────────────────────────────────────────────────────────────────┘
-```
-
----
-
-## 端口智能管理
-
-```
-端口 443 (VLESS Reality):
-  被占用? → 暂停原 systemd 服务 → Xray 启动 → 不恢复 (Xray 需要)
-
-端口 80 (仅 HTTP-01 ACME 模式):
-  DNS-01 模式: 无需 80 端口，全程关闭
-  HTTP-01 模式: 临时开 → 获证 → 关闭 (需 UFW 临时放行)
-
-端口 8443 (Caddy):
-  被占用? → 暂停 → 不恢复 (Caddy 需要)
-
-端口 10001 (VLESS XHTTP):
-  仅 127.0.0.1 监听，不对外 → Caddy 反代 → CF Tunnel
-```
-
----
-
-## ACME 证书模式
-
-| 模式 | 环境变量 | 需要开端口 | 适用场景 |
-|------|---------|-----------|---------|
-| **HTTP-01** (默认) | 无需 | 80 (临时) | 简单部署，端口 80 可用 |
-| **DNS-01** (推荐) | `ACME_MODE_ENV=dns` + `CF_DNS_TOKEN_ENV=...` | 无 | 生产环境，CF 托管域名 |
-
-DNS-01 Token 创建：https://dash.cloudflare.com/profile/api-tokens → 编辑区域 DNS → 选择域名 → 复制 Token
+基础非交互部署（Reality + Hysteria2）：
 
 ```bash
-# DNS-01 一键部署
-ACME_MODE_ENV=dns CF_DNS_TOKEN_ENV="cfut_..." sudo -E bash vps-deploy.sh my.example.com BVL
+sudo bash vps-deploy.sh node.example.com BVL admin@example.com
 ```
 
----
-
-## 前置准备（运行脚本之前）
-
-| 步骤 | 操作 |
-|---|---|
-| ① DNS A | `你的域名` → VPS IP → 🟡 **灰云** (DNS only) |
-| ② Tunnel | https://one.dash.cloudflare.com/ → Networks → Tunnels → Create → 复制 Token |
-| ③ Public Hostname | Tunnel → Configure → Subdomain: `cdn-xxx` / HTTP / **`localhost:10001`** |
-| ④ DNS CNAME | `cdn-xxx.域名` → `xxx.cfargotunnel.com` → 🟠 橙云 |
-| ⑤ DNS-01 Token (可选) | API Token → 编辑区域 DNS → 选择域名 |
-
-> ⚠️ 第③步不完成 = CDN 节点永远不通。脚本有红色强提醒。
-> 💡 DNS-01 模式下第⑤步可跳过 80 端口操作，推荐生产环境使用。
-
----
-
-## 节点命名
-
-```
-🇯🇵 JP BVL VR     ← VLESS Reality (主力 · 低延迟)
-🇯🇵 JP BVL H2     ← Hysteria2   (弱网加速 · 高吞吐)
-🇯🇵 JP BVL VX     ← VLESS XHTTP (兜底 · Cloudflare CDN 中转)
-```
-
-格式：`{国旗} {国家码} {服务商码} {协议缩写}` — 空格分隔
-
----
-
-## 环境变量参考
-
-| 变量 | 用途 | 示例 |
-|------|------|------|
-| `DOMAIN_ENV` | 域名 | `my.example.com` |
-| `PROVIDER_ENV` | 服务商标识 | `BVL` |
-| `EMAIL_ENV` | Let's Encrypt 通知邮箱 | `admin@example.com` |
-| `ACME_MODE_ENV` | 证书验证模式 | `http` (默认) / `dns` |
-| `CF_DNS_TOKEN_ENV` | Cloudflare DNS API Token | `cfut_...` |
-| `CF_TOKEN_ENV` | Cloudflare Tunnel Token | `eyJ...` |
-
----
-
-## 订阅链接
-
-| 客户端 | 格式 |
-|---|---|
-| Clash Verge | `http://<域名>:8443/<token>/clash.yaml` |
-| Loon (iPhone) | `http://<域名>:8443/<token>/loon.conf` |
-| 流量看板 | `http://<域名>:8443/traffic/` |
-
----
-
-## 系统要求
-
-| 项目 | 要求 |
-|---|---|
-| OS | Ubuntu 20.04+ / Debian 11+ |
-| 架构 | x86_64 / ARM64 (aarch64) |
-| 内存 | ≥ 1GB (<1GB 会警告) |
-| 权限 | root (sudo) |
-| 域名 | 托管在 Cloudflare |
-
----
-
-## 断点续传
-
-重跑脚本：已安装服务跳过 · 配置自动更新 · 密钥自动复用 · UUID 旧格式自动迁移 · 订阅 token 不变
-
----
-
-## 安全特性
-
-| 功能 | 说明 |
-|------|------|
-| SSH 加固 | 仅密钥登录 · 禁密码 · 禁 X11 · MaxAuthTries=3 |
-| fail2ban | SSH 防爆破 + Xray 拒绝日志监控（双 jail） |
-| 凭证保护 | 所有密钥文件 chmod 600 ·
-| 域名校验 | 输入格式正则验证（防注入） |
-| 信号捕获 | trap INT/TERM 自动恢复被暂停的服务 |
-| ACME 限速保护 | systemd StartLimitBurst 防 LE 限额耗尽 |
-
----
-
-## 维护
+加入 Cloudflare Tunnel/XHTTP/WebSocket：
 
 ```bash
-/usr/local/bin/gen-subs.sh                    # 重新生成订阅
-systemctl status xray hysteria-server caddy   # 服务状态
-vim /etc/vps-proxy/subs.conf                  # 修改配置
-fail2ban-client status                        # 查看封禁状态
+CDN_DOMAIN_ENV=cdn.node.example.com \
+CF_TOKEN_ENV='eyJ...' \
+sudo -E bash vps-deploy.sh node.example.com BVL admin@example.com
 ```
+
+DNS-01（无需 HTTP-01，但每次重写 Hysteria 配置时都要重新传 Token）：
+
+```bash
+ACME_MODE_ENV=dns \
+CF_DNS_TOKEN_ENV='Cloudflare-DNS-API-Token' \
+sudo -E bash vps-deploy.sh node.example.com BVL admin@example.com
+```
+
+DNS-01 + CDN：
+
+```bash
+ACME_MODE_ENV=dns \
+CF_DNS_TOKEN_ENV='Cloudflare-DNS-API-Token' \
+CDN_DOMAIN_ENV=cdn.node.example.com \
+CF_TOKEN_ENV='eyJ...' \
+sudo -E bash vps-deploy.sh node.example.com BVL admin@example.com
+```
+
+## Cloudflare Public Hostname
+
+启用 CDN 后，脚本会在本机建立以下链路：
+
+```text
+客户端 → https://cdn.node.example.com:443
+       → Cloudflare Tunnel
+       → http://127.0.0.1:10000 (Caddy，仅监听回环地址)
+       ├→ /<xhttp-path> → Xray 127.0.0.1:10001
+       ├→ /<websocket-path> → Xray 127.0.0.1:10002
+       └→ /<subscription-token>/... → HTTPS 订阅与流量看板
+```
+
+在 Zero Trust 控制台中添加：
+
+```text
+Public hostname: cdn.node.example.com
+Service type:    HTTP
+URL:             127.0.0.1:10000
+```
+
+不是 `127.0.0.1:10001` 或 `127.0.0.1:10002`。这两个端口分别是 Xray 的 XHTTP 与 WebSocket 内部入口，由 Caddy 根据独立秘密路径分流。客户端统一使用 CDN 域名的标准 TLS 443。
+
+完成 Cloudflare 设置后运行：
+
+```bash
+sudo bash vps-deploy.sh --check
+```
+
+检查会真实启动本机临时客户端，通过 Reality、Hysteria2，以及已就绪的 XHTTP、WebSocket 节点访问外网；只有真实代理出站成功才算协议自测通过。
+
+## ACME 模式
+
+| 模式 | 环境变量 | 防火墙要求 | 说明 |
+|---|---|---|---|
+| HTTP-01（默认） | `ACME_MODE_ENV=http` | 80/tcp 必须长期允许 | Hysteria 自行续证，续证时间不可预知，不能在首次申请后关闭 80 |
+| DNS-01 | `ACME_MODE_ENV=dns` + `CF_DNS_TOKEN_ENV` | 不需要 80/tcp | Cloudflare 配置键使用官方的 `cloudflare_api_token` |
+
+DNS Token 只写入权限为 `root:hysteria 640` 的 Hysteria 配置，不写入 v4 状态文件。重跑 DNS-01 安装时必须再次提供。
+
+## 端口
+
+| 端口 | 协议 | 对公网 |
+|---|---|---|
+| 当前 SSH 端口/tcp | SSH | 是；脚本从当前连接或 `sshd -T` 检测，不修改端口 |
+| 443/tcp | VLESS Reality | 是 |
+| 443/udp | Hysteria2 | 是 |
+| 80/tcp | HTTP-01 申请和续期 | 仅 HTTP-01 模式 |
+| 10000/tcp | Caddy Tunnel origin | 否，只监听 127.0.0.1 |
+| 10001/tcp | Xray XHTTP origin | 否，只监听 127.0.0.1 |
+| 10002/tcp | Xray WebSocket origin | 否，只监听 127.0.0.1 |
+
+UFW 采用增量规则，不执行 `ufw reset`。如果要自行管理防火墙：
+
+```bash
+MANAGE_UFW_ENV=0 sudo -E bash vps-deploy.sh node.example.com BVL admin@example.com
+```
+
+脚本遇到端口冲突会停止并报告，不会停止服务或 `fuser -k` 杀进程。
+
+## 客户端配置
+
+启用 CDN 后：
+
+```text
+Clash: https://<CDN_DOMAIN>/<token>/clash.yaml
+Loon:  https://<CDN_DOMAIN>/<token>/loon.conf
+```
+
+未启用 CDN 时，文件只保存在 VPS：
+
+```text
+/var/lib/subscription/<token>/clash.yaml
+/var/lib/subscription/<token>/loon.conf
+```
+
+可用 `scp` 取回。不要通过明文 HTTP 传输这些文件，它们包含节点凭证。
+
+Loon 官方当前列出的传输没有 XHTTP，因此不会生成伪 XHTTP 节点。启用 CDN 后，Loon 配置包含 Reality、Hysteria2 和官方支持的 VLESS WebSocket；Clash/Mihomo 配置包含 Reality、Hysteria2、XHTTP 和 WebSocket。
+
+WebSocket 的优势是客户端兼容性，不是隐蔽性或最低延迟。Xray 上游提示 WebSocket 具有明显的 HTTP/1.1 Upgrade 特征，因此 Mihomo 优先保留 XHTTP，Loon 才使用 WebSocket 作为 CDN 兜底。
+
+若要比较 Clash 与 Loon 的测速数字，应统一测试地址与超时。例如两端都使用：
+
+```text
+https://cp.cloudflare.com/generate_204
+3000 ms
+```
+
+Loon 可在主配置 `[General]` 中设置 `proxy-test-url = https://cp.cloudflare.com/generate_204` 与 `test-timeout = 3`。`loon.conf` 是节点订阅，不能替代 iPhone 上的 Loon 主配置；不同测试地址、超时或客户端测速实现得到的数字不能直接比较。
+
+## 环境变量
+
+| 变量 | 用途 |
+|---|---|
+| `DOMAIN_ENV` | 直连域名 |
+| `PROVIDER_ENV` | 1-16 位节点服务商代码 |
+| `EMAIL_ENV` | ACME 邮箱 |
+| `COUNTRY_ENV` | 两位国家码；自动检测失败或需覆盖时使用 |
+| `REALITY_TARGET_ENV` | `host:443`；未知地区必须显式设置 |
+| `ACME_MODE_ENV` | `http` 或 `dns` |
+| `CF_DNS_TOKEN_ENV` | Cloudflare DNS API Token |
+| `CDN_DOMAIN_ENV` | Cloudflare Tunnel 公网域名；首次不设置则不启用 XHTTP、WebSocket 和在线订阅 |
+| `CF_TOKEN_ENV` | Cloudflare Tunnel Token；只用于首次注册服务 |
+| `MANAGE_UFW_ENV` | `1`（默认）或 `0` |
+| `SKIP_DNS_CHECK_ENV` | 仅紧急情况下设 `1`；正常不要跳过 |
+
+## 幂等、迁移与备份
+
+- v4 状态：`/etc/vps-proxy/state.env`，`root:root 600`。
+- 旧版 `subs.conf` 只按字段读取并验证，不再 `source`，避免历史输入造成命令注入。
+- Reality 私钥、公钥、Short ID、UUID、Hysteria 密码和订阅 Token 会在重跑时复用。
+- 覆盖 Xray、Hysteria、Caddy 配置前会复制到 `/var/backups/vps-proxy/<timestamp>/`。
+- 若新配置导致上述服务启动失败，脚本会自动恢复该次备份并尝试重启。
+- 现有 cloudflared 服务不会被新 Token 静默覆盖。
+- Xray 配置在安装前用官方二进制校验；客户端 Clash 配置由仓库 CI 使用 Mihomo 校验。
+
+固定并校验的组件：
+
+| 组件 | 版本 |
+|---|---|
+| Xray-core | v26.3.27 |
+| Hysteria | v2.12.1 |
+| Caddy | v2.11.4 |
+| cloudflared | 2026.7.3 |
+
+下载使用仓库中固定的 SHA-256；版本升级必须同步更新版本、校验值和 CI 验证器。
+
+## 验收与维护
+
+```bash
+sudo bash vps-deploy.sh --check
+systemctl status xray hysteria-server caddy cloudflared
+journalctl -u xray -u hysteria-server --since '1 hour ago' --no-pager
+```
+
+仓库本地测试：
+
+```bash
+bash -n vps-deploy.sh tests/audit-tests.sh
+shellcheck -S style vps-deploy.sh tests/audit-tests.sh
+bash tests/audit-tests.sh
+```
+
+## 关于 100 ms 延迟
+
+安装脚本不能让“任意 VPS”都低于 100 ms。延迟下限主要由客户端到机房的物理距离、运营商路由、晚高峰拥塞和丢包决定；BBR、QUIC、XHTTP 或 WebSocket 都不能突破传播时延。
+
+要争取低于 100 ms：
+
+1. 购买前从实际客户端网络测试机房测试 IP，连续测多个时段。
+2. 优先选择物理距离近、回程线路合适的机房；不要只看 VPS 所在国家。
+3. 部署后在客户端分别测试 Reality 和 Hysteria2；CDN/XHTTP/WebSocket 是可用性与兼容性兜底，不一定更低延迟。
+
+更完整的缺陷证据、历史结论复核和剩余边界见 [AUDIT.md](AUDIT.md)。
