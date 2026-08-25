@@ -8,7 +8,7 @@
 
 原 v3.1.1 不能作为“任意新 VPS 上可靠一键部署”的版本。它包含多项必现或高概率关键故障，其中一些是历史日志中已经修过、随后又被新提交重新引入的回归；另一些来自 CHANGELOG 中未经上游文档验证的技术假设。
 
-v4 已重构关键路径；v4.1 为 Loon 增加了官方支持的 VLESS WebSocket CDN 节点；v4.1.1 修复了输入校验、Tunnel Token 进程参数暴露和 origin 回环验收；v4.1.2 删除服务商代码；v4.1.3 根据 GCP 首装中的实际故障，增加了 Hysteria ACME 遗留属主安全修复、失败阶段记录、待提交状态和 fail2ban 降级报告。本地验证覆盖 Bash 语法、ShellCheck、官方 Xray/Hysteria/Mihomo 解析或启动验证，以及 XHTTP/WebSocket 分别经真实 Caddy 的端到端模拟，共 49 项回归断言。Ubuntu 22.04 GCP e2-micro `us-gcp` 已通过首次脚本安装、Reality/Hysteria2 直连自测、Tunnel 连接和 Cloudflare Published application 后的 XHTTP/WebSocket 与 Clash/Loon HTTPS 订阅验收；但该机存在先前留下的 ACME 目录，仍不等价于一台完全干净、可销毁 VPS 的首装证明。
+v4 已重构关键路径；v4.1 为 Loon 增加了官方支持的 VLESS WebSocket CDN 节点；v4.1.1 修复了输入校验、Tunnel Token 进程参数暴露和 origin 回环验收；v4.1.2 删除服务商代码；v4.1.3 增加首装恢复与 Hysteria ACME 遗留属主安全修复；v4.2.0 新增 Quantumult X 原生 Reality/Vision 与可选 WSS 订阅。本地验证覆盖 Bash 语法、ShellCheck、官方 Xray/Hysteria/Mihomo 解析或启动验证、XHTTP/WebSocket 分别经真实 Caddy 的端到端模拟，以及对 Quantumult X 官方示例字段的精确回归断言，共 52 项。复核时确认 v4.1.3 文档所述“49 项”为历史误记，当时脚本实际输出 39 项；本矩阵只采信实际执行计数。Ubuntu 22.04 GCP e2-micro `us-gcp` 已通过 v4.1.3 前身路径的首次脚本安装、Reality/Hysteria2 直连自测、Tunnel 连接和 Cloudflare Published application 后的 XHTTP/WebSocket 与 Clash/Loon HTTPS 订阅验收；它未进行 v4.2.0 真机 Quantumult X 导入，且存在先前留下的 ACME 目录，仍不等价于一台完全干净、可销毁 VPS 的首装证明。
 
 ## 已确认的关键缺陷
 
@@ -54,7 +54,7 @@ v4 已重构关键路径；v4.1 为 Loon 增加了官方支持的 VLESS WebSocke
 - “XHTTP 迁移要更新 Tunnel 路径”：Public Hostname 的 origin URL 与 XHTTP HTTP path 是两层概念。正确架构应由本地 HTTP 路由器按 path 分发。
 - “协议优化可以把任意节点做到 100 ms 以下”：不成立。传播距离和运营商路由决定基础 RTT。
 
-## v4.1.3 验证矩阵
+## v4.2.0 验证矩阵
 
 | 验证 | 结果 |
 |---|---|
@@ -65,6 +65,7 @@ v4 已重构关键路径；v4.1 为 Loon 增加了官方支持的 VLESS WebSocke
 | Xray 26.3.27 Reality 自测客户端配置解析 | 通过 |
 | Xray 26.3.27 XHTTP 自测客户端配置解析 | 通过 |
 | Xray 26.3.27 WebSocket 自测客户端配置解析 | 通过 |
+| Xray 26.3.27 含 Quantumult X 独立 Reality 用户的服务端配置解析 | 通过 |
 | Hysteria 2.12.1 使用生成的 QUIC/BBR 字段实际启动 | 通过 |
 | Mihomo 1.19.29 解析生成的 Clash 配置 | 通过 |
 | Caddy 2.11.4 配置解析 + Cloudflare Host 真实请求 | 通过 |
@@ -72,7 +73,8 @@ v4 已重构关键路径；v4.1 为 Loon 增加了官方支持的 VLESS WebSocke
 | Xray WebSocket → Caddy → Xray → HTTP 目标端到端模拟 | 通过 |
 | 非交互 `main` 全路径无副作用模拟 | 通过 |
 | 旧配置备份与失败恢复模拟 | 通过 |
-| 安全/回归断言 | 49 项通过 |
+| Quantumult X 官方 Reality/Vision、WSS 字段与不支持协议排除 | 通过 |
+| 安全/回归断言 | 52 项通过 |
 | 现有 Ubuntu 22.04 `jp-bvl` 更新至 v4.1.2、服务商状态迁移、四协议真实出站、服务重启后复检 | 通过 |
 | Ubuntu 22.04 GCP e2-micro `us-gcp` 首装、故障复现、重跑、Cloudflare 新控制台路由与四协议/订阅验收 | 通过；机内存在旧 ACME 遗留，不视为纯净首装 |
 
@@ -91,6 +93,7 @@ CI 文件：`.github/workflows/validate.yml`
 - Caddy Automatic HTTPS：<https://caddyserver.com/docs/automatic-https>
 - Mihomo VLESS/XHTTP：<https://wiki.metacubex.one/en/config/proxies/transport/>
 - Loon 节点支持列表：<https://nsloon.app/docs/Node/>
+- Quantumult X 官方完整示例：<https://github.com/crossutility/Quantumult-X/blob/master/sample.conf>
 - Caddy WebSocket reverse proxy：<https://caddyserver.com/docs/caddyfile/directives/reverse_proxy>
 
 REALITY 官方明确提示：认证失败流量会被转发到 target；若 target 是特殊 CDN IP，服务器可能被扫描后滥用。v4 会在 VPS 上验证 target 的 TLS 1.3 与 SNI 行为，但“同 ASN target”无法仅靠通用脚本可靠自动化，未知国家因此要求显式提供 `REALITY_TARGET_ENV`。
@@ -102,5 +105,6 @@ REALITY 官方明确提示：认证失败流量会被转发到 target；若 targ
 3. **Reality target 会随网络和站点运维变化。** 今天支持 TLS 1.3 不代表永久适合；每次安装会重新探测。
 4. **版本固定意味着需要维护。** 固定版本提高可复现性，但不会自动获得上游安全更新；升级必须复核配置兼容并更新 SHA-256/CI。
 5. **延迟无脚本保证。** v4 的真实出站自测证明协议能转发，不代表客户端侧 RTT 小于 100 ms。
+6. **Quantumult X 无 Linux 官方解析器。** CI 可核对官方示例字段、独立 UUID 服务端授权和 HTTPS 取回，但不能代替 iPhone/iPad 真机导入与连接验收。
 
 在交付“任意新 VPS 可用”结论前，最低还应在一台临时 Ubuntu 22.04/24.04 或 Debian 12/13 VPS 上完成：首次安装、重跑、重启、证书续期路径、Reality/Hysteria/XHTTP/WebSocket 客户端真实连接和回滚演练。

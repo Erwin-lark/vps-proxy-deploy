@@ -1,4 +1,4 @@
-# 从零部署手册：VPS、Cloudflare、Clash Verge 与 Loon
+# 从零部署手册：VPS、Cloudflare、Clash Verge、Loon 与 Quantumult X
 
 本文是 `vps-deploy.sh` 的逐步操作手册，面向一台全新的 Ubuntu/Debian VPS。它把必须手动完成的 DNS、Cloudflare Token、Tunnel、Public Hostname、客户端导入、验收和故障排查全部展开。
 
@@ -6,12 +6,14 @@
 
 | 简称 | 协议 | 客户端 | 公网入口 |
 |---|---|---|---|
-| VR | VLESS Reality | Clash/Mihomo、Loon | 直连域名 `443/tcp` |
+| VR | VLESS Reality | Clash/Mihomo、Loon、Quantumult X | 直连域名 `443/tcp` |
 | H2 | Hysteria2 | Clash/Mihomo、Loon | 直连域名 `443/udp` |
 | VX | VLESS XHTTP + Cloudflare | Clash/Mihomo | CDN 域名 `443/tcp` |
-| VW | VLESS WebSocket + Cloudflare | Clash/Mihomo、Loon | CDN 域名 `443/tcp` |
+| VW | VLESS WebSocket + Cloudflare | Clash/Mihomo、Loon、Quantumult X | CDN 域名 `443/tcp` |
 
 Loon 不支持 XHTTP，因此 Loon 正常情况下只有 `VR / H2 / VW` 三个节点；Clash/Mihomo 有 `VR / H2 / VX / VW` 四个节点。
+
+Quantumult X 订阅只输出官方原生字段能表达的节点：未启用 CDN 时只有 `VR`，启用 CDN 时有 `VR / VW`。`H2 / VX` 不出现是正常的，不会为了“凑数”生成客户端无法使用的伪配置。
 
 节点名称格式是“国旗 + 国家码 + 协议缩写”，例如 `🇯🇵 JP VR`。脚本不需要服务商代码，也不会把服务商标识写入状态或订阅。
 
@@ -608,6 +610,7 @@ ssh -T <SSH_ALIAS> '
 ```text
 Clash：https://<CDN_DOMAIN>/<SUB_TOKEN>/clash.yaml
 Loon： https://<CDN_DOMAIN>/<SUB_TOKEN>/loon.conf
+Quantumult X：https://<CDN_DOMAIN>/<SUB_TOKEN>/qx.conf
 ```
 
 `SUB_TOKEN` 是订阅秘密。不要把完整 URL 发布到 GitHub、截图、公开测速网站或公共订阅转换服务。
@@ -700,7 +703,72 @@ test-timeout = 3
 3. 在浏览器以本人身份打开订阅 URL，确认文本内有一行名称以 `VW = VLESS` 开头；不要把内容截图外发。
 4. 运行服务器 `--check`，确认 WebSocket/Cloudflare 自测通过。
 
-## 15. 如何正确比较延迟
+## 15. Quantumult X 导入、刷新与验证
+
+### 15.1 导入前提
+
+1. 先把 Quantumult X 更新到支持 VLESS Reality 的新版；v4.2.0 按 Quantumult X 1.7.0 官方示例的字段生成。
+2. 确认服务器脚本已是 v4.2.0 或更高版本，并且已用安装模式成功重跑过一次。只替换脚本文件却不重跑，服务端不会凭空多出 Quantumult X 的独立 Reality UUID。
+3. 在 VPS 上执行 `sudo bash /root/vps-deploy.sh --check`，确认 `Cloudflare HTTPS 订阅：通过`。
+4. 复制安装摘要中以 `/qx.conf` 结尾的 URL，不要使用 `clash.yaml` 或 `loon.conf`。
+
+### 15.2 在界面中添加远程节点资源
+
+Quantumult X 不同语言和版本的标签可能略有差异，但对象必须是“服务器/节点的远程资源”，不是分流规则、复写或整份主配置。
+
+1. 打开 Quantumult X，进入设置。
+2. 进入“节点/服务器”的“资源”页面。
+3. 点击右上角 `+`，选择链接/URL 类型的远程资源。
+4. 在 URL 中粘贴：
+
+```text
+https://<CDN_DOMAIN>/<SUB_TOKEN>/qx.conf
+```
+
+5. 资源名可填 `My VPS`；开启该资源。
+6. 如果界面显示“优化解析器/opt-parser”，保持关闭。`qx.conf` 已是 Quantumult X 原生语法，不需要第三方转换。
+7. 保存后立即手动更新一次资源。
+
+启用 CDN 时应看到：
+
+```text
+🇯🇵 JP VR
+🇯🇵 JP VW
+```
+
+国旗和国家码由 VPS 地区自动识别，上面的 JP 只是示例。未启用 CDN 时只出现 `VR`。Quantumult X 中看不到 `H2 / VX` 是预期结果。
+
+### 15.3 直接编辑主配置的备用方法
+
+如果你已经自己维护 Quantumult X 主配置，可在 `[server_remote]` 下加入一行：
+
+```ini
+[server_remote]
+https://<CDN_DOMAIN>/<SUB_TOKEN>/qx.conf, tag=My-VPS, update-interval=86400, enabled=true
+```
+
+如果主配置已有 `[server_remote]`，只加 URL 那一行，不要重复写第二个同名区段。保存并重新加载配置后，手动同步资源。
+
+### 15.4 统一测速
+
+在 Quantumult X 主配置 `[general]` 中可统一使用：
+
+```ini
+server_check_url = https://cp.cloudflare.com/generate_204
+server_check_timeout = 3000
+```
+
+Quantumult X 的网页响应测试、Clash/Mihomo 和 Loon 的实现不完全相同；即使 URL 与超时一致，数字也只适合做趋势对比，不代表脚本能保证低于 100ms。
+
+### 15.5 导入失败排查
+
+1. 在 Safari 中打开完整 `qx.conf` URL。应看到以 `vless=` 开头的一至两行文本；不要截图或转发，其中包含 UUID。
+2. 如果是 404，先确认 URL 以 `/qx.conf` 结尾，然后在 VPS 用安装模式重跑 v4.2.0，再执行 `--check`。
+3. 如果是 Cloudflare 502，重新核对 Published application 的 Service URL 必须为 `http://127.0.0.1:10000`。
+4. 如果 URL 有内容但资源报语法错，确认导入的是“服务器/节点资源”，关闭 `opt-parser`，更新 Quantumult X 后删除旧资源并重新添加。
+5. 如果只有 `VR` 而预期还有 `VW`，确认本次安装确实传入 `CDN_DOMAIN_ENV`，并且 `--check` 中 WebSocket/Cloudflare 自测通过。
+
+## 16. 如何正确比较延迟
 
 不同客户端显示的数字只有在以下条件全部一致时才可比较：
 
@@ -740,9 +808,9 @@ ping -c 20 <TEST_IP>
 
 最低要求可设为：平均 RTT 小于 80ms、0% 丢包，为代理握手和抖动预留空间。只达到 95ms 的 ICMP 并不保证应用测速低于 100ms。
 
-## 16. 常见故障
+## 17. 常见故障
 
-### 16.1 Tunnel 页面一直“尚未检测到连接”
+### 17.1 Tunnel 页面一直“尚未检测到连接”
 
 原因：Tunnel 已创建，但 VPS 上 cloudflared 还没安装或 Token 错误。
 
@@ -756,7 +824,7 @@ sudo stat -c '%U:%G %a %n' /etc/cloudflared/token
 
 不要因为首次尚未连接就删除 Tunnel。先完成第 8 节部署。
 
-### 16.2 Cloudflare 返回 502/Bad Gateway
+### 17.2 Cloudflare 返回 502/Bad Gateway
 
 核对 Public Hostname：
 
@@ -773,7 +841,7 @@ sudo systemctl status caddy cloudflared
 
 不要把 Service URL 设置成 CDN 域名、VPS 公网 IP、HTTPS、10001 或 10002。
 
-### 16.3 DNS 校验说记录不指向本机
+### 17.3 DNS 校验说记录不指向本机
 
 检查：
 
@@ -786,7 +854,7 @@ curl -6 --noproxy '*' https://api64.ipify.org
 
 删除旧 IP、残留 AAAA，并确认直连记录是灰云。不要常态使用 `SKIP_DNS_CHECK_ENV=1` 掩盖错误。
 
-### 16.4 Hysteria2 申请证书失败
+### 17.4 Hysteria2 申请证书失败
 
 检查：
 
@@ -806,7 +874,7 @@ DNS Token 不会写入状态文件，所以每次重写 Hysteria DNS-01 配置�
 
 如果日志出现 `permission denied`，而上述目录或证书文件属于 `root:root`，通常是以前安装留下的 ACME 数据与当前 `hysteria` 服务用户不兼容。v4.1.3 会自动修正只包含同文件系普通文件/目录的安全目录树属主；如果其中存在符号链接、硬链接、特殊文件或嵌套挂载，脚本会拒绝递归改权并要求先人工审查，避免越界修改其他文件。
 
-### 16.5 Hysteria2 节点超时，其他节点正常
+### 17.5 Hysteria2 节点超时，其他节点正常
 
 ```bash
 sudo ss -H -lunp 'sport = :443'
@@ -815,15 +883,15 @@ sudo ufw status numbered
 
 确认 443/udp 对公网允许。某些 Wi-Fi 会限制 UDP/QUIC；切换蜂窝网络是有价值的对照测试。
 
-### 16.6 Clash/Loon 数字差异很大
+### 17.6 Clash/Loon/Quantumult X 数字差异很大
 
 先统一测试 URL 和超时，再比较。不同 URL 可能命中完全不同的 CDN、DNS 和网络栈；“客户端显示多少毫秒”不是单纯的 VPS ICMP RTT。
 
-### 16.7 Xray 日志提示 WebSocket deprecated
+### 17.7 Xray 日志提示 WebSocket deprecated
 
 这是上游对 WebSocket 传输的弃用提示。当前保留 VW 是为了 Loon CDN 兼容；Mihomo 优先保留 XHTTP。未来 Loon 若支持 XHTTP，或 Xray 真正移除 WebSocket，需要迁移，而不是忽略版本升级测试。
 
-### 16.8 fail2ban 显示 inactive
+### 17.8 fail2ban 显示 inactive
 
 fail2ban 不参与代理数据面，因此它启动失败不会让四种协议自测伪报失败；但 SSH 防暴力尝试尚未就绪，不应长期忽略：
 
@@ -836,7 +904,7 @@ sudo fail2ban-client status sshd
 
 修正日志中的原因后执行 `sudo systemctl restart fail2ban`，再运行 `sudo bash /root/vps-deploy.sh --check`。
 
-## 17. 日常只读检查
+## 18. 日常只读检查
 
 ```bash
 ssh -T <SSH_ALIAS> '
@@ -854,7 +922,7 @@ ssh -T <SSH_ALIAS> '
 
 `XHTTP context canceled` 若恰好出现在自测完成时，可能只是测试客户端获得结果后主动结束流，不等于协议失败；以 `--check` 的真实代理出站结果为准。
 
-## 18. 更新脚本的安全流程
+## 19. 更新脚本的安全流程
 
 更新前：
 
@@ -882,7 +950,7 @@ bash /root/vps-deploy-new.sh --check
 systemctl status xray hysteria-server caddy cloudflared --no-pager
 ```
 
-## 19. 备份与回滚原则
+## 20. 备份与回滚原则
 
 脚本在覆盖 Xray、Hysteria、Caddy 配置前备份到：
 
@@ -907,7 +975,7 @@ find /var/backups/vps-proxy -maxdepth 2 -type f -printf '%TY-%Tm-%Td %TH:%TM %m 
 
 状态文件和订阅包含节点凭证，备份权限必须是 600，不能上传 GitHub。
 
-## 20. Token 轮换
+## 21. Token 轮换
 
 ### DNS API Token
 
@@ -926,7 +994,7 @@ find /var/backups/vps-proxy -maxdepth 2 -type f -printf '%TY-%Tm-%Td %TH:%TM %m 
 
 轮换 Tunnel Token 会影响 connector 重新连接，应安排维护窗口；不要在没有回滚路径时直接删除 Tunnel。
 
-## 21. 全新 VPS 最终验收清单
+## 22. 全新 VPS 最终验收清单
 
 Cloudflare：
 
@@ -954,17 +1022,20 @@ VPS：
 
 - [ ] Clash 显示 VR/H2/VX/VW。
 - [ ] Loon 显示 VR/H2/VW。
-- [ ] 两端使用相同测试 URL 和超时。
+- [ ] Quantumult X 在启用 CDN 时显示 VR/VW，未启用 CDN 时只显示 VR。
+- [ ] Quantumult X 资源直接使用 `qx.conf`，不启用第三方 `opt-parser`。
+- [ ] 各客户端使用相同测试 URL 和超时。
 - [ ] Wi-Fi 与蜂窝分别测试。
 - [ ] 记录丢包、平均值与波动，不只看一次数字。
 - [ ] 实际网页、视频、UDP 应用均正常，而不只是测速按钮成功。
 
-## 22. 上游资料
+## 23. 上游资料
 
 - Cloudflare API Token：<https://developers.cloudflare.com/fundamentals/api/get-started/create-token/>
 - Cloudflare Tunnel setup：<https://developers.cloudflare.com/tunnel/setup/>
 - Cloudflare Tunnel token 轮换：<https://developers.cloudflare.com/tunnel/advanced/tunnel-tokens/>
 - Hysteria ACME DNS：<https://hysteria.network/docs/advanced/ACME-DNS-Config/>
+- Quantumult X 官方完整示例：<https://github.com/crossutility/Quantumult-X/blob/master/sample.conf>
 - Xray Reality：<https://xtls.github.io/en/config/transports/reality.html>
 - Xray WebSocket：<https://xtls.github.io/en/config/transports/websocket.html>
 - Mihomo proxy-provider 健康检查：<https://wiki.metacubex.one/en/config/proxy-providers/>

@@ -6,6 +6,28 @@
 
 ---
 
+## v4.2.0 — Quantumult X 原生订阅 (2026-08-25)
+
+### 新增
+
+- 新增 `qx.conf` 远程节点资源，在启用 Cloudflare 时通过与 Clash/Loon 相同的 HTTPS 订阅目录发布。
+- Quantumult X 始终获得独立 UUID 的 VLESS Reality + Vision `VR`；启用 CDN 时再加入 VLESS WebSocket + TLS `VW`。
+- 订阅门户、安装摘要、Caddy 本地可达性与 Cloudflare HTTPS 可达性检查同步覆盖 `qx.conf`。
+- `MANUAL.md` 新增 Quantumult X 从导入、`[server_remote]` 备用写法、统一测速到 404/502/语法错的逐步排查。
+
+### 兼容性与迁移
+
+- 严格使用 Quantumult X 官方 `sample.conf` 的 VLESS Reality/Vision 与 VLESS WSS 字段；Reality 明确关闭 TCP Fast Open。
+- 不生成 Quantumult X 当前无原生语法的 Hysteria2 或 XHTTP 节点，因此启用 CDN 时预期为 `VR / VW`，未启用 CDN 时预期为 `VR`。
+- 现有 v4.1.x 安装重跑 v4.2.0 时保留 Clash、Loon、Hysteria2、XHTTP、WebSocket 和订阅 Token 的旧凭据，只新增 `STATE_VR_QX_UUID`。
+- 从 v3 迁移时，经过格式验证的旧 `VL_UUIDS_1` 可复用为 Quantumult X Reality UUID。旧 v4.1.x 状态在未先重跑安装模式时执行新版 `--check`，会明确要求先完成 v4.2 迁移，不会伪报 Quantumult X 已可用。
+
+### 验证
+
+- 回归断言增加 Quantumult X 独立凭据持久化、v3 凭据迁移、Xray 客户授权、Reality/Vision、WSS、直连模式、节点命名、不支持协议排除、门户链接与 Caddy 真实取回；完整回归断言从实际 39 项增至 52 项。
+- 复核发现 v4.1.3 日志把当时测试输出的 39 项误记为 49 项；本版以实际执行末行计数为准，不继续累加错误基线。
+- 官方 Xray 解析包含 Quantumult X 独立 Reality 用户的服务端配置；Quantumult X 没有可用于 Linux CI 的官方配置解析器，`qx.conf` 通过官方示例字段精确回归断言验证，真机导入仍列为发布后验收边界。
+
 ## v4.1.3 — 首装恢复与教程防错 (2026-08-09)
 
 ### 首装可恢复性
@@ -21,7 +43,7 @@
 - Cloudflare 步骤更新为当前 `Networking → Tunnels → Routes → Add route → Published application`，明确新界面的完整 `http://127.0.0.1:10000` Service URL、多 Zone 下拉选择、Routes 计数、proxied CNAME 和 TLS 传播检查。
 - DNS 排错增加 Clash/Mihomo TUN/Fake-IP 对 `dig @1.1.1.1` 的影响说明；返回 `198.18.0.0/15` 时改从 VPS 的独立网络复核。
 - 在 Ubuntu 22.04 GCP e2-micro `us-gcp` 执行首次安装：发现旧 ACME 目录的 `root:root` 遗留会使 Hysteria 拒绝启动；修正属主后重跑通过 Reality、Hysteria2 直连自测。Tunnel 连接后还必须手动新建 Published application；选对 Zone 后 XHTTP、WebSocket、Clash/Loon HTTPS 订阅均通过。
-- 回归断言增加 ACME 安全对象白名单、待提交状态重载/提升时序和 fail2ban 降级状态；完整验证数增至 49 项。
+- 回归断言增加 ACME 安全对象白名单、待提交状态重载/提升时序和 fail2ban 降级状态；当时日志误记为 49 项，v4.2.0 重新执行该基线确认实际为 39 项。
 
 ## v4.1.2 — 删除服务商代码 (2026-08-09)
 

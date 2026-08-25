@@ -5,7 +5,7 @@
 set -Eeuo pipefail
 umask 027
 
-SCRIPT_VERSION="4.1.3"
+SCRIPT_VERSION="4.2.0"
 XRAY_VERSION="v26.3.27"
 HYSTERIA_VERSION="app/v2.12.1"
 CADDY_VERSION="v2.11.4"
@@ -227,6 +227,8 @@ migrate_legacy_state() {
     local value
     value=$(legacy_value VL_UUIDS_0)
     valid_uuid "$value" && STATE_VR_CLASH_UUID="$value"
+    value=$(legacy_value VL_UUIDS_1)
+    valid_uuid "$value" && STATE_VR_QX_UUID="$value"
     value=$(legacy_value VL_UUIDS_2)
     valid_uuid "$value" && STATE_VR_LOON_UUID="$value"
     value=$(legacy_value HY2_PASS)
@@ -730,6 +732,7 @@ new_uuid() {
 ensure_secrets() {
     VR_CLASH_UUID="${STATE_VR_CLASH_UUID:-}"
     VR_LOON_UUID="${STATE_VR_LOON_UUID:-}"
+    VR_QX_UUID="${STATE_VR_QX_UUID:-}"
     HY2_PASS="${STATE_HY2_PASS:-}"
     XHTTP_UUID="${STATE_XHTTP_UUID:-}"
     XHTTP_PATH="${STATE_XHTTP_PATH:-}"
@@ -742,6 +745,7 @@ ensure_secrets() {
 
     valid_uuid "$VR_CLASH_UUID" || VR_CLASH_UUID=$(new_uuid)
     valid_uuid "$VR_LOON_UUID" || VR_LOON_UUID=$(new_uuid)
+    valid_uuid "$VR_QX_UUID" || VR_QX_UUID=$(new_uuid)
     [[ "$HY2_PASS" =~ ^[A-Za-z0-9._~-]{16,128}$ ]] || HY2_PASS=$(openssl rand -hex 24)
     valid_uuid "$XHTTP_UUID" || XHTTP_UUID=$(new_uuid)
     valid_xhttp_path "$XHTTP_PATH" || XHTTP_PATH="/${XHTTP_UUID%%-*}-xhttp"
@@ -854,7 +858,8 @@ EOF
       "settings": {
         "clients": [
           {"id": "${VR_CLASH_UUID}", "flow": "xtls-rprx-vision", "email": "clash"},
-          {"id": "${VR_LOON_UUID}", "flow": "xtls-rprx-vision", "email": "loon"}
+          {"id": "${VR_LOON_UUID}", "flow": "xtls-rprx-vision", "email": "loon"},
+          {"id": "${VR_QX_UUID}", "flow": "xtls-rprx-vision", "email": "quantumult-x"}
         ],
         "decryption": "none"
       },
@@ -1254,6 +1259,7 @@ write_state_file() {
         printf 'STATE_XRAY_LISTEN=%q\n' "$XRAY_LISTEN"
         printf 'STATE_VR_CLASH_UUID=%q\n' "$VR_CLASH_UUID"
         printf 'STATE_VR_LOON_UUID=%q\n' "$VR_LOON_UUID"
+        printf 'STATE_VR_QX_UUID=%q\n' "$VR_QX_UUID"
         printf 'STATE_HY2_PASS=%q\n' "$HY2_PASS"
         printf 'STATE_XHTTP_UUID=%q\n' "$XHTTP_UUID"
         printf 'STATE_XHTTP_PATH=%q\n' "$XHTTP_PATH"
@@ -1288,7 +1294,7 @@ write_subscriptions() {
             chown root:root "$SUB_ROOT" "$sub_dir"
         fi
     fi
-    local cdn_yaml="" cdn_group="" loon_ws=""
+    local cdn_yaml="" cdn_group="" loon_ws="" qx_ws=""
     if $ENABLE_CDN; then
         cdn_yaml=$(cat <<EOF
 
@@ -1332,6 +1338,7 @@ EOF
 EOF
 )
         loon_ws="${NODE_PREFIX} VW = VLESS,${CDN_DOMAIN},443,\"${WS_UUID}\",transport=ws,path=${WS_PATH},host=${CDN_DOMAIN},over-tls=true,sni=${CDN_DOMAIN},skip-cert-verify=false,udp=true"
+        qx_ws="vless=${CDN_DOMAIN}:443, method=none, password=${WS_UUID}, obfs=wss, obfs-host=${CDN_DOMAIN}, obfs-uri=${WS_PATH}, tls-verification=true, fast-open=false, udp-relay=true, tag=${NODE_PREFIX} VW"
     fi
     cat > "$sub_dir/clash.yaml" <<EOF
 mixed-port: 7890
@@ -1385,8 +1392,13 @@ ${NODE_PREFIX} H2 = Hysteria2,${DOMAIN},${HY2_PORT},"${HY2_PASS}",sni=${DOMAIN},
 ${loon_ws}
 EOF
 
+    cat > "$sub_dir/qx.conf" <<EOF
+vless=${DOMAIN}:${REALITY_PORT}, method=none, password=${VR_QX_UUID}, obfs=over-tls, obfs-host=${REALITY_SNI}, reality-base64-pubkey=${REALITY_PUBKEY}, reality-hex-shortid=${REALITY_SHORTID}, vless-flow=xtls-rprx-vision, fast-open=false, udp-relay=true, tag=${NODE_PREFIX} VR
+${qx_ws}
+EOF
+
     cat > "$sub_dir/index.html" <<EOF
-<!doctype html><html lang="zh"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="robots" content="noindex,nofollow"><title>${NODE_PREFIX}</title><style>body{max-width:38rem;margin:4rem auto;padding:1rem;background:#0d1117;color:#c9d1d9;font-family:system-ui}a{display:block;margin:.8rem 0;padding:1rem;color:#58a6ff;background:#161b22;border:1px solid #30363d;border-radius:.5rem;text-decoration:none}</style></head><body><h1>${NODE_PREFIX}</h1><a href="clash.yaml">Clash Verge 配置</a><a href="loon.conf">Loon 配置</a><a href="traffic/">流量看板</a></body></html>
+<!doctype html><html lang="zh"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="robots" content="noindex,nofollow"><title>${NODE_PREFIX}</title><style>body{max-width:38rem;margin:4rem auto;padding:1rem;background:#0d1117;color:#c9d1d9;font-family:system-ui}a{display:block;margin:.8rem 0;padding:1rem;color:#58a6ff;background:#161b22;border:1px solid #30363d;border-radius:.5rem;text-decoration:none}</style></head><body><h1>${NODE_PREFIX}</h1><a href="clash.yaml">Clash Verge 配置</a><a href="loon.conf">Loon 配置</a><a href="qx.conf">Quantumult X 配置</a><a href="traffic/">流量看板</a></body></html>
 EOF
 
     if $ENABLE_CDN && command -v getent >/dev/null 2>&1 && getent group caddy >/dev/null; then
@@ -1395,7 +1407,7 @@ EOF
         find "$sub_dir" -type f -exec chmod 0640 {} +
     else
         chmod 0700 "$sub_dir"
-        chmod 0600 "$sub_dir/clash.yaml" "$sub_dir/loon.conf" "$sub_dir/index.html"
+        chmod 0600 "$sub_dir/clash.yaml" "$sub_dir/loon.conf" "$sub_dir/qx.conf" "$sub_dir/index.html"
     fi
 }
 
@@ -1701,13 +1713,15 @@ health_check() {
         failed=true
     fi
     if $ENABLE_CDN; then
-        if curl -fsS --noproxy '*' --max-time 8 "http://127.0.0.1:${CADDY_ORIGIN_PORT}/${SUB_TOKEN}/clash.yaml" >/dev/null; then
+        if curl -fsS --noproxy '*' --max-time 8 "http://127.0.0.1:${CADDY_ORIGIN_PORT}/${SUB_TOKEN}/clash.yaml" >/dev/null &&
+            curl -fsS --noproxy '*' --max-time 8 "http://127.0.0.1:${CADDY_ORIGIN_PORT}/${SUB_TOKEN}/qx.conf" >/dev/null; then
             info "Caddy 本地订阅：通过"
         else
             err "Caddy 本地订阅：失败"
             failed=true
         fi
-        if curl -fsS --noproxy '*' --max-time 12 "https://${CDN_DOMAIN}/${SUB_TOKEN}/clash.yaml" >/dev/null; then
+        if curl -fsS --noproxy '*' --max-time 12 "https://${CDN_DOMAIN}/${SUB_TOKEN}/clash.yaml" >/dev/null &&
+            curl -fsS --noproxy '*' --max-time 12 "https://${CDN_DOMAIN}/${SUB_TOKEN}/qx.conf" >/dev/null; then
             info "Cloudflare HTTPS 订阅：通过"
             local cdn_protocols_ok=true
             if selftest_xhttp; then
@@ -1749,12 +1763,14 @@ print_summary() {
         printf '  WebSocket：%s:443（Cloudflare → http://127.0.0.1:%s）\n' "$CDN_DOMAIN" "$CADDY_ORIGIN_PORT"
         printf '  Clash：https://%s/%s/clash.yaml\n' "$CDN_DOMAIN" "$SUB_TOKEN"
         printf '  Loon：https://%s/%s/loon.conf\n' "$CDN_DOMAIN" "$SUB_TOKEN"
+        printf '  Quantumult X：https://%s/%s/qx.conf\n' "$CDN_DOMAIN" "$SUB_TOKEN"
         printf '\nCloudflare Published application 必须设置为：\n'
         printf '  %s → http://127.0.0.1:%s\n' "$CDN_DOMAIN" "$CADDY_ORIGIN_PORT"
     else
         printf '  Clash 文件：%s/%s/clash.yaml\n' "$SUB_ROOT" "$SUB_TOKEN"
         printf '  Loon 文件：%s/%s/loon.conf\n' "$SUB_ROOT" "$SUB_TOKEN"
-        printf '  未启用 CDN；Loon 配置只含官方支持的 Reality 与 Hysteria2。\n'
+        printf '  Quantumult X 文件：%s/%s/qx.conf\n' "$SUB_ROOT" "$SUB_TOKEN"
+        printf '  未启用 CDN；Quantumult X 配置只含 Reality。\n'
     fi
     printf '\n只读复检：sudo bash %s --check\n' "$0"
     printf '说明：脚本验证协议可用性；客户端到 VPS 的 <100ms 延迟取决于物理距离和线路，无法由脚本保证。\n'
@@ -1781,6 +1797,7 @@ PY
     NODE_PREFIX="${FLAG} ${COUNTRY}"
     VR_CLASH_UUID=${STATE_VR_CLASH_UUID:?}
     VR_LOON_UUID=${STATE_VR_LOON_UUID:?}
+    VR_QX_UUID=${STATE_VR_QX_UUID:-}
     HY2_PASS=${STATE_HY2_PASS:?}
     XHTTP_UUID=${STATE_XHTTP_UUID:-}
     XHTTP_PATH=${STATE_XHTTP_PATH:-}
@@ -1790,6 +1807,8 @@ PY
     REALITY_PRIVKEY=${STATE_REALITY_PRIVKEY:?}
     REALITY_PUBKEY=${STATE_REALITY_PUBKEY:?}
     REALITY_SHORTID=${STATE_REALITY_SHORTID:?}
+    valid_uuid "$VR_QX_UUID" || \
+        die "Quantumult X 状态尚未生成；请先运行一次安装模式升级到 v4.2，再使用 --check"
     [[ -n "$CDN_DOMAIN" ]] && ENABLE_CDN=true || ENABLE_CDN=false
     if $ENABLE_CDN; then
         if ! valid_uuid "$XHTTP_UUID" || ! valid_xhttp_path "$XHTTP_PATH" || \

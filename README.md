@@ -5,7 +5,7 @@
 - VLESS + XTLS Vision + REALITY（TCP 443，主力）
 - Hysteria 2（UDP 443，弱网/高吞吐）
 - 可选 VLESS XHTTP（Cloudflare Tunnel，Mihomo 备用线路）
-- 可选 VLESS WebSocket（同一 Tunnel，Loon/Mihomo CDN 备用线路）
+- 可选 VLESS WebSocket（同一 Tunnel，Loon/Quantumult X/Mihomo CDN 备用线路）
 
 v4 的目标是可审计、可重跑、失败不伪装成成功。脚本不依赖任何既有 VPS，也不会修改 SSH 登录方式、删除用户、清空既有防火墙规则或自动杀死端口占用进程。
 
@@ -13,7 +13,9 @@ v4 的目标是可审计、可重跑、失败不伪装成成功。脚本不依�
 
 v4.1.3 为首装失败增加阶段标记和待提交状态，安全重跑会复用已生成凭证；同时会审查并修复无链接的 Hysteria ACME 遗留属主，避免服务用户无法读写证书目录。
 
-首次部署、Cloudflare 两枚 Token、Tunnel “尚未检测到连接”、Public Hostname、Clash/Loon 导入、统一测速、更新、回滚和逐项排错，请直接阅读 **[从零部署超详细手册](MANUAL.md)**。
+v4.2.0 新增 Quantumult X 原生节点资源 `qx.conf`：直连 Reality 使用独立 UUID，启用 CDN 时再加入 VLESS WebSocket。不生成 Quantumult X 当前不支持的 Hysteria2 或 XHTTP 伪节点。
+
+首次部署、Cloudflare 两枚 Token、Tunnel “尚未检测到连接”、Public Hostname、Clash/Loon/Quantumult X 导入、统一测速、更新、回滚和逐项排错，请直接阅读 **[从零部署超详细手册](MANUAL.md)**。
 
 ## 支持范围
 
@@ -160,6 +162,7 @@ MANAGE_UFW_ENV=0 sudo --preserve-env=MANAGE_UFW_ENV \
 ```text
 Clash: https://<CDN_DOMAIN>/<token>/clash.yaml
 Loon:  https://<CDN_DOMAIN>/<token>/loon.conf
+Quantumult X: https://<CDN_DOMAIN>/<token>/qx.conf
 ```
 
 未启用 CDN 时，文件只保存在 VPS：
@@ -167,15 +170,18 @@ Loon:  https://<CDN_DOMAIN>/<token>/loon.conf
 ```text
 /var/lib/subscription/<token>/clash.yaml
 /var/lib/subscription/<token>/loon.conf
+/var/lib/subscription/<token>/qx.conf
 ```
 
 可用 `scp` 取回。不要通过明文 HTTP 传输这些文件，它们包含节点凭证。
 
 Loon 官方当前列出的传输没有 XHTTP，因此不会生成伪 XHTTP 节点。启用 CDN 后，Loon 配置包含 Reality、Hysteria2 和官方支持的 VLESS WebSocket；Clash/Mihomo 配置包含 Reality、Hysteria2、XHTTP 和 WebSocket。
 
+Quantumult X 资源使用官方 VLESS Reality/Vision 与 VLESS WSS 字段。`VR` 始终生成，`VW` 只在启用 CDN 时生成；`H2` 与 `VX` 不会写入 `qx.conf`。请使用支持 VLESS Reality 的新版 Quantumult X；v4.2.0 以 1.7.0 官方示例字段为校验基线。
+
 WebSocket 的优势是客户端兼容性，不是隐蔽性或最低延迟。Xray 上游提示 WebSocket 具有明显的 HTTP/1.1 Upgrade 特征，因此 Mihomo 优先保留 XHTTP，Loon 才使用 WebSocket 作为 CDN 兜底。
 
-若要比较 Clash 与 Loon 的测速数字，应统一测试地址与超时。例如两端都使用：
+若要比较 Clash、Loon 与 Quantumult X 的测速数字，应统一测试地址与超时。例如各端都使用：
 
 ```text
 https://cp.cloudflare.com/generate_204
@@ -183,6 +189,8 @@ https://cp.cloudflare.com/generate_204
 ```
 
 Loon 可在主配置 `[General]` 中设置 `proxy-test-url = https://cp.cloudflare.com/generate_204` 与 `test-timeout = 3`。`loon.conf` 是节点订阅，不能替代 iPhone 上的 Loon 主配置；不同测试地址、超时或客户端测速实现得到的数字不能直接比较。
+
+Quantumult X 可在主配置 `[general]` 中设置 `server_check_url = https://cp.cloudflare.com/generate_204` 与 `server_check_timeout = 3000`。
 
 ## 环境变量
 
@@ -204,7 +212,7 @@ Loon 可在主配置 `[General]` 中设置 `proxy-test-url = https://cp.cloudfla
 - v4 状态：`/etc/vps-proxy/state.env`，`root:root 600`。
 - 中断恢复：`/etc/vps-proxy/install-phase` 记录阶段，`state.pending` 在健康检查前保留已生成凭证；成功后前者删除、后者提升为 `state.env`。
 - 旧版 `subs.conf` 只按字段读取并验证，不再 `source`，避免历史输入造成命令注入。
-- Reality 私钥、公钥、Short ID、UUID、Hysteria 密码和订阅 Token 会在重跑时复用。
+- Reality 私钥、公钥、Short ID、Clash/Loon/Quantumult X 独立 UUID、Hysteria 密码和订阅 Token 会在重跑时复用。
 - 覆盖 Xray、Hysteria、Caddy 配置前会复制到 `/var/backups/vps-proxy/<timestamp>/`。
 - 若新配置导致上述服务启动失败，脚本会自动恢复该次备份并尝试重启。
 - 现有 cloudflared 服务不会被新 Token 静默覆盖。

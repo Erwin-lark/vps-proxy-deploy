@@ -105,6 +105,17 @@ pass "interrupted install reloads pending credentials"
 )
 pass "verified install atomically promotes pending state"
 
+(
+    LEGACY_STATE_FILE="$test_root/legacy-subs.conf"
+    printf '%s\n' 'VL_UUIDS_1="00000000-0000-4000-8000-000000000009"' > "$LEGACY_STATE_FILE"
+    state_file_is_safe() { [[ "$1" == "$LEGACY_STATE_FILE" ]]; }
+    unset STATE_VR_QX_UUID
+    migrate_legacy_state >/dev/null 2>&1
+    [[ "$STATE_VR_QX_UUID" == "00000000-0000-4000-8000-000000000009" ]] || \
+        fail "legacy Quantumult X Reality credential was not migrated"
+)
+pass "v3 secondary Reality credential migrates to Quantumult X"
+
 SUB_ROOT="$test_root/subscription"
 SUB_TOKEN="0123456789abcdef0123456789abcdef0123"
 ENABLE_CDN=true
@@ -115,6 +126,7 @@ REALITY_PORT=443
 HY2_PORT=443
 VR_CLASH_UUID="00000000-0000-4000-8000-000000000001"
 VR_LOON_UUID="00000000-0000-4000-8000-000000000002"
+VR_QX_UUID="00000000-0000-4000-8000-000000000005"
 XHTTP_UUID="00000000-0000-4000-8000-000000000003"
 WS_UUID="00000000-0000-4000-8000-000000000004"
 HY2_PASS="0123456789abcdef0123456789abcdef"
@@ -130,6 +142,8 @@ WS_PORT=10002
 write_subscriptions
 clash_file="$SUB_ROOT/$SUB_TOKEN/clash.yaml"
 loon_file="$SUB_ROOT/$SUB_TOKEN/loon.conf"
+qx_file="$SUB_ROOT/$SUB_TOKEN/qx.conf"
+index_file="$SUB_ROOT/$SUB_TOKEN/index.html"
 
 assert_contains "$clash_file" 'server: cdn.node.example.com' "XHTTP uses the CDN hostname"
 assert_contains "$clash_file" 'port: 443' "CDN client uses TLS port 443"
@@ -143,6 +157,24 @@ assert_not_contains "$loon_file" 'transport=xhttp' "unsupported Loon XHTTP omitt
 assert_contains "$loon_file" 'Hysteria2,node.example.com,443' "Loon Hysteria2 retained"
 assert_contains "$loon_file" 'VW = VLESS,cdn.node.example.com,443' "Loon includes the WebSocket CDN node"
 assert_contains "$loon_file" 'transport=ws,path=/44556677-ws,host=cdn.node.example.com' "Loon WebSocket syntax follows the official format"
+assert_contains "$qx_file" 'vless=node.example.com:443, method=none, password=00000000-0000-4000-8000-000000000005' "Quantumult X Reality uses an independent VLESS credential"
+assert_contains "$qx_file" 'obfs=over-tls, obfs-host=www.nic.ad.jp' "Quantumult X Reality uses the official TLS obfuscation fields"
+assert_contains "$qx_file" 'reality-base64-pubkey=0WLDJHaOLiK1sj1q-yDCao1ARBWyN8zPlvdbI6Qd13A, reality-hex-shortid=0011223344556677' "Quantumult X Reality includes the official Reality key fields"
+assert_contains "$qx_file" 'vless-flow=xtls-rprx-vision, fast-open=false, udp-relay=true, tag=🇯🇵 JP VR' "Quantumult X Reality enables Vision and disables incompatible TCP Fast Open"
+assert_contains "$qx_file" 'vless=cdn.node.example.com:443, method=none, password=00000000-0000-4000-8000-000000000004, obfs=wss, obfs-host=cdn.node.example.com, obfs-uri=/44556677-ws' "Quantumult X includes the compatible WebSocket CDN node"
+assert_not_contains "$qx_file" 'Hysteria2' "unsupported Quantumult X Hysteria2 omitted"
+assert_not_contains "$qx_file" 'xhttp' "unsupported Quantumult X XHTTP omitted"
+assert_contains "$index_file" 'href="qx.conf"' "subscription portal links the Quantumult X resource"
+
+cdn_sub_token=$SUB_TOKEN
+ENABLE_CDN=false
+SUB_TOKEN="abcdef0123456789abcdef0123456789abcd"
+write_subscriptions
+direct_qx_file="$SUB_ROOT/$SUB_TOKEN/qx.conf"
+assert_contains "$direct_qx_file" 'tag=🇯🇵 JP VR' "direct-only Quantumult X resource retains Reality"
+assert_not_contains "$direct_qx_file" 'tag=🇯🇵 JP VW' "direct-only Quantumult X resource omits the CDN node"
+ENABLE_CDN=true
+SUB_TOKEN=$cdn_sub_token
 
 assert_contains "$REPO_ROOT/vps-deploy.sh" 'cloudflare_api_token:' "official Hysteria Cloudflare key"
 assert_not_contains "$REPO_ROOT/vps-deploy.sh" 'auth_token:' "obsolete Hysteria token key absent"
@@ -161,6 +193,8 @@ assert_contains "$REPO_ROOT/vps-deploy.sh" 'tunnel run --token-file /etc/cloudfl
 assert_contains "$REPO_ROOT/vps-deploy.sh" 'chown --no-dereference hysteria:hysteria' "Hysteria ACME residue is repaired without following links"
 assert_contains "$REPO_ROOT/vps-deploy.sh" 'write_state_file "$PENDING_STATE_FILE"' "credentials are staged before service configuration"
 assert_contains "$REPO_ROOT/vps-deploy.sh" 'mv -f -- "$PENDING_STATE_FILE" "$STATE_FILE"' "pending state is promoted only after verification"
+assert_contains "$REPO_ROOT/vps-deploy.sh" 'STATE_VR_QX_UUID=%q' "Quantumult X Reality credential is persisted"
+assert_contains "$REPO_ROOT/vps-deploy.sh" '"email": "quantumult-x"' "Xray authorizes the Quantumult X Reality credential"
 assert_contains "$REPO_ROOT/vps-deploy.sh" 'fail2ban：inactive' "health check reports degraded SSH abuse protection"
 assert_not_contains "$REPO_ROOT/vps-deploy.sh" 'PROVIDER_ENV' "service-provider input removed"
 assert_not_contains "$REPO_ROOT/vps-deploy.sh" 'STATE_PROVIDER' "service-provider state removed"
@@ -185,13 +219,18 @@ if [[ -n "${CADDY_BIN:-}" ]]; then
     caddy_pid=$!
     test_pids+=("$caddy_pid")
     caddy_body=""
+    caddy_qx_body=""
     for _ in $(seq 1 30); do
         caddy_body=$(curl -fsS -H 'Host: cdn.node.example.com' \
             "http://127.0.0.1:${CADDY_ORIGIN_PORT}/${SUB_TOKEN}/clash.yaml" 2>/dev/null || true)
-        [[ "$caddy_body" == *'server: cdn.node.example.com'* ]] && break
+        caddy_qx_body=$(curl -fsS -H 'Host: cdn.node.example.com' \
+            "http://127.0.0.1:${CADDY_ORIGIN_PORT}/${SUB_TOKEN}/qx.conf" 2>/dev/null || true)
+        [[ "$caddy_body" == *'server: cdn.node.example.com'* &&
+            "$caddy_qx_body" == *'vless=cdn.node.example.com:443'* ]] && break
         sleep 0.1
     done
-    [[ "$caddy_body" == *'server: cdn.node.example.com'* ]] || {
+    [[ "$caddy_body" == *'server: cdn.node.example.com'* &&
+        "$caddy_qx_body" == *'vless=cdn.node.example.com:443'* ]] || {
         sed -n '1,100p' "$test_root/caddy.log" >&2
         fail "Caddy origin does not accept the Cloudflare Host header"
     }
