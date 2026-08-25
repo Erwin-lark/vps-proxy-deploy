@@ -169,6 +169,7 @@ assert_contains "$index_file" 'href="qx.conf"' "subscription portal links the Qu
 cdn_sub_token=$SUB_TOKEN
 ENABLE_CDN=false
 SUB_TOKEN="abcdef0123456789abcdef0123456789abcd"
+# shellcheck disable=SC2218
 write_subscriptions
 direct_qx_file="$SUB_ROOT/$SUB_TOKEN/qx.conf"
 assert_contains "$direct_qx_file" 'tag=🇯🇵 JP VR' "direct-only Quantumult X resource retains Reality"
