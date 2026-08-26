@@ -1,6 +1,6 @@
 # 严格审计报告
 
-审计日期：2026-08-09
+初次审计：2026-08-09；本次复核：2026-08-26
 审计对象：`aa757e6`（原 main）及完整 Git 历史
 修复分支：`audit/portable-v4`
 
@@ -8,7 +8,7 @@
 
 原 v3.1.1 不能作为“任意新 VPS 上可靠一键部署”的版本。它包含多项必现或高概率关键故障，其中一些是历史日志中已经修过、随后又被新提交重新引入的回归；另一些来自 CHANGELOG 中未经上游文档验证的技术假设。
 
-v4 已重构关键路径；v4.1 为 Loon 增加了官方支持的 VLESS WebSocket CDN 节点；v4.1.1 修复了输入校验、Tunnel Token 进程参数暴露和 origin 回环验收；v4.1.2 删除服务商代码；v4.1.3 增加首装恢复与 Hysteria ACME 遗留属主安全修复；v4.2.0 新增 Quantumult X 原生 Reality/Vision 与可选 WSS 订阅。本地验证覆盖 Bash 语法、ShellCheck、官方 Xray/Hysteria/Mihomo 解析或启动验证、XHTTP/WebSocket 分别经真实 Caddy 的端到端模拟，以及对 Quantumult X 官方示例字段的精确回归断言，共 52 项。复核时确认 v4.1.3 文档所述“49 项”为历史误记，当时脚本实际输出 39 项；本矩阵只采信实际执行计数。Ubuntu 22.04 GCP e2-micro `us-gcp` 已通过 v4.1.3 前身路径的首次脚本安装、Reality/Hysteria2 直连自测、Tunnel 连接和 Cloudflare Published application 后的 XHTTP/WebSocket 与 Clash/Loon HTTPS 订阅验收；它未进行 v4.2.0 真机 Quantumult X 导入，且存在先前留下的 ACME 目录，仍不等价于一台完全干净、可销毁 VPS 的首装证明。
+v4 已重构关键路径；v4.1 为 Loon 增加了官方支持的 VLESS WebSocket CDN 节点；v4.1.1 修复了输入校验、Tunnel Token 进程参数暴露和 origin 回环验收；v4.1.2 删除服务商代码；v4.1.3 增加首装恢复与 Hysteria ACME 遗留属主安全修复；v4.2.0 新增 Quantumult X 原生 Reality/Vision 与可选 WSS 订阅；v4.3.0 根据当前需求恢复经过严格校验的服务商代码，并统一到所有客户端、策略组和门户。本地验证覆盖 Bash 语法、ShellCheck、官方 Xray/Hysteria/Mihomo 解析或启动验证、XHTTP/WebSocket 分别经真实 Caddy 的端到端模拟、Quantumult X 官方字段，以及服务商输入/状态/迁移/更名不换凭证，共 60 项。复核时确认 v4.1.3 文档所述“49 项”为历史误记，当时脚本实际输出 39 项；本矩阵只采信实际执行计数。Ubuntu 22.04 GCP e2-micro `us-gcp` 已通过 v4.1.3 前身路径的首次脚本安装、Reality/Hysteria2 直连自测、Tunnel 连接和 Cloudflare Published application 后的 XHTTP/WebSocket 与 Clash/Loon HTTPS 订阅验收；它未进行 v4.2.0 真机 Quantumult X 导入，也未部署本次 v4.3.0，且存在先前留下的 ACME 目录，仍不等价于一台完全干净、可销毁 VPS 的首装证明。
 
 ## 已确认的关键缺陷
 
@@ -54,7 +54,7 @@ v4 已重构关键路径；v4.1 为 Loon 增加了官方支持的 VLESS WebSocke
 - “XHTTP 迁移要更新 Tunnel 路径”：Public Hostname 的 origin URL 与 XHTTP HTTP path 是两层概念。正确架构应由本地 HTTP 路由器按 path 分发。
 - “协议优化可以把任意节点做到 100 ms 以下”：不成立。传播距离和运营商路由决定基础 RTT。
 
-## v4.2.0 验证矩阵
+## v4.3.0 验证矩阵
 
 | 验证 | 结果 |
 |---|---|
@@ -74,8 +74,10 @@ v4 已重构关键路径；v4.1 为 Loon 增加了官方支持的 VLESS WebSocke
 | 非交互 `main` 全路径无副作用模拟 | 通过 |
 | 旧配置备份与失败恢复模拟 | 通过 |
 | Quantumult X 官方 Reality/Vision、WSS 字段与不支持协议排除 | 通过 |
-| 安全/回归断言 | 52 项通过 |
-| 现有 Ubuntu 22.04 `jp-bvl` 更新至 v4.1.2、服务商状态迁移、四协议真实出站、服务重启后复检 | 通过 |
+| 服务商代码格式、大小写规范化、非交互必填、状态复用和 v3 迁移 | 通过 |
+| Clash/Loon/Quantumult X/策略组/门户统一服务商命名，且更名不改变凭证 | 通过 |
+| 安全/回归断言 | 60 项通过 |
+| 现有 Ubuntu 22.04 `jp-bvl` 更新至 v4.1.2、删除服务商状态、四协议真实出站、服务重启后复检 | 通过（历史验收，不代表 v4.3.0 已部署） |
 | Ubuntu 22.04 GCP e2-micro `us-gcp` 首装、故障复现、重跑、Cloudflare 新控制台路由与四协议/订阅验收 | 通过；机内存在旧 ACME 遗留，不视为纯净首装 |
 
 CI 文件：`.github/workflows/validate.yml`
@@ -106,5 +108,6 @@ REALITY 官方明确提示：认证失败流量会被转发到 target；若 targ
 4. **版本固定意味着需要维护。** 固定版本提高可复现性，但不会自动获得上游安全更新；升级必须复核配置兼容并更新 SHA-256/CI。
 5. **延迟无脚本保证。** v4 的真实出站自测证明协议能转发，不代表客户端侧 RTT 小于 100 ms。
 6. **Quantumult X 无 Linux 官方解析器。** CI 可核对官方示例字段、独立 UUID 服务端授权和 HTTPS 取回，但不能代替 iPhone/iPad 真机导入与连接验收。
+7. **服务商代码不能可靠自动识别。** IP/ASN 数据可能只显示上游网络、云平台或转售商的母公司；为避免把 BVL、YOO 等节点误命名，v4.3.0 要求首次安装由用户明确提供代码。
 
 在交付“任意新 VPS 可用”结论前，最低还应在一台临时 Ubuntu 22.04/24.04 或 Debian 12/13 VPS 上完成：首次安装、重跑、重启、证书续期路径、Reality/Hysteria/XHTTP/WebSocket 客户端真实连接和回滚演练。

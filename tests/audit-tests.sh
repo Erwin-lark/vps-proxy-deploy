@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# shellcheck disable=SC1091,SC2034,SC2016,SC2317,SC2329
+# shellcheck disable=SC1091,SC2030,SC2031,SC2034,SC2016,SC2317,SC2329
 set -Eeuo pipefail
 
 REPO_ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
@@ -33,6 +33,12 @@ valid_domain node.example.com || fail "valid domain rejected"
 ! valid_domain 'node.example.com;touch /tmp/pwn' || fail "injection domain accepted"
 valid_email admin@example.com || fail "valid email rejected"
 ! valid_email 'bad@example' || fail "invalid email accepted"
+valid_provider_code BVL || fail "valid provider code rejected"
+valid_provider_code GCP2026 || fail "alphanumeric provider code rejected"
+! valid_provider_code gcp || fail "lowercase provider code accepted before normalization"
+! valid_provider_code A || fail "one-character provider code accepted"
+! valid_provider_code 'BVL-1' || fail "provider punctuation accepted"
+! valid_provider_code 'TOOLONG99' || fail "overlong provider code accepted"
 valid_uuid '00000000-0000-4000-8000-000000000001' || fail "canonical UUID rejected"
 ! valid_uuid '000000000000-4000-8000-000000000001' || fail "malformed UUID accepted"
 valid_xhttp_path '/00112233-xhttp' || fail "safe XHTTP path rejected"
@@ -42,6 +48,47 @@ valid_ws_path '/44556677-ws' || fail "safe WebSocket path rejected"
 valid_short_id '0011223344556677' || fail "valid Reality short ID rejected"
 ! valid_short_id '001' || fail "odd-length Reality short ID accepted"
 pass "input validators"
+
+(
+    NON_INTERACTIVE=true
+    DOMAIN_ENV=node.example.com
+    EMAIL_ENV=admin@example.com
+    PROVIDER_ENV=gcp
+    ACME_MODE_ENV=http
+    CDN_DOMAIN_ENV=
+    MANAGE_UFW_ENV=0
+    SKIP_DNS_CHECK_ENV=0
+    ARG_DOMAIN=
+    ARG_EMAIL=
+    unset CF_DNS_TOKEN_ENV CF_TOKEN_ENV
+    unset STATE_DOMAIN STATE_EMAIL STATE_PROVIDER STATE_ACME_MODE STATE_CDN_DOMAIN
+    configure_inputs >/dev/null
+    [[ "$PROVIDER" == "GCP" ]] || fail "provider code was not normalized to uppercase"
+    PROVIDER_ENV=
+    STATE_PROVIDER=yoo
+    configure_inputs >/dev/null
+    [[ "$PROVIDER" == "YOO" ]] || fail "saved provider code was not reused and normalized"
+)
+pass "non-interactive provider code is normalized and saved state is reused"
+
+if (
+    NON_INTERACTIVE=true
+    DOMAIN_ENV=node.example.com
+    EMAIL_ENV=admin@example.com
+    PROVIDER_ENV=
+    ACME_MODE_ENV=http
+    CDN_DOMAIN_ENV=
+    MANAGE_UFW_ENV=0
+    SKIP_DNS_CHECK_ENV=0
+    ARG_DOMAIN=
+    ARG_EMAIL=
+    unset CF_DNS_TOKEN_ENV CF_TOKEN_ENV
+    unset STATE_DOMAIN STATE_EMAIL STATE_PROVIDER STATE_ACME_MODE STATE_CDN_DOMAIN
+    configure_inputs >/dev/null 2>&1
+); then
+    fail "non-interactive install accepted a missing provider code"
+fi
+pass "non-interactive install requires a provider code"
 [[ $(dns_record_status 6 '2001:db8::1' '2001:0db8:0:0:0:0:0:1') == "match" ]] || \
     fail "equivalent IPv6 DNS address rejected"
 [[ $(dns_record_status 4 '192.0.2.10' $'192.0.2.10\n192.0.2.11') == "mismatch" ]] || \
@@ -107,19 +154,22 @@ pass "verified install atomically promotes pending state"
 
 (
     LEGACY_STATE_FILE="$test_root/legacy-subs.conf"
-    printf '%s\n' 'VL_UUIDS_1="00000000-0000-4000-8000-000000000009"' > "$LEGACY_STATE_FILE"
+    printf '%s\n' \
+        'VL_UUIDS_1="00000000-0000-4000-8000-000000000009"' \
+        'PROVIDER="yoo"' > "$LEGACY_STATE_FILE"
     state_file_is_safe() { [[ "$1" == "$LEGACY_STATE_FILE" ]]; }
     unset STATE_VR_QX_UUID
     migrate_legacy_state >/dev/null 2>&1
     [[ "$STATE_VR_QX_UUID" == "00000000-0000-4000-8000-000000000009" ]] || \
         fail "legacy Quantumult X Reality credential was not migrated"
+    [[ "$STATE_PROVIDER" == "YOO" ]] || fail "legacy provider code was not normalized and migrated"
 )
-pass "v3 secondary Reality credential migrates to Quantumult X"
+pass "v3 Reality credential and provider code migrate safely"
 
 SUB_ROOT="$test_root/subscription"
 SUB_TOKEN="0123456789abcdef0123456789abcdef0123"
 ENABLE_CDN=true
-NODE_PREFIX="🇯🇵 JP"
+NODE_PREFIX="🇯🇵 JP BVL"
 DOMAIN="node.example.com"
 CDN_DOMAIN="cdn.node.example.com"
 REALITY_PORT=443
@@ -145,26 +195,42 @@ loon_file="$SUB_ROOT/$SUB_TOKEN/loon.conf"
 qx_file="$SUB_ROOT/$SUB_TOKEN/qx.conf"
 index_file="$SUB_ROOT/$SUB_TOKEN/index.html"
 
+for protocol in VR H2 VX VW; do
+    grep -Fq -- "name: \"🇯🇵 JP BVL ${protocol}\"" "$clash_file" || \
+        fail "Clash provider prefix missing from ${protocol}"
+done
+for protocol in VR H2 VW; do
+    grep -Fq -- "🇯🇵 JP BVL ${protocol} =" "$loon_file" || \
+        fail "Loon provider prefix missing from ${protocol}"
+done
+for protocol in VR VW; do
+    grep -Fq -- "tag=🇯🇵 JP BVL ${protocol}" "$qx_file" || \
+        fail "Quantumult X provider prefix missing from ${protocol}"
+done
+pass "all supported client nodes use the provider prefix"
+
 assert_contains "$clash_file" 'server: cdn.node.example.com' "XHTTP uses the CDN hostname"
 assert_contains "$clash_file" 'port: 443' "CDN client uses TLS port 443"
 assert_contains "$clash_file" 'mode: packet-up' "XHTTP uses the most compatible CDN mode"
-assert_contains "$clash_file" 'name: "🇯🇵 JP VW"' "Clash includes the WebSocket CDN node"
+assert_contains "$clash_file" 'name: "🇯🇵 JP BVL VW"' "Clash includes the provider-named WebSocket CDN node"
 assert_contains "$clash_file" 'network: ws' "Clash WebSocket node uses a supported transport"
 assert_not_contains "$clash_file" 'smux:' "nested client mux removed"
 assert_contains "$clash_file" 'proxy-groups:' "Clash profile has a selectable proxy group"
+assert_contains "$clash_file" '- "🇯🇵 JP BVL VR"' "Clash proxy group references the provider-named Reality node"
 assert_contains "$clash_file" 'MATCH,PROXY' "Clash profile routes traffic through the selected node"
 assert_not_contains "$loon_file" 'transport=xhttp' "unsupported Loon XHTTP omitted"
 assert_contains "$loon_file" 'Hysteria2,node.example.com,443' "Loon Hysteria2 retained"
-assert_contains "$loon_file" 'VW = VLESS,cdn.node.example.com,443' "Loon includes the WebSocket CDN node"
+assert_contains "$loon_file" '🇯🇵 JP BVL VW = VLESS,cdn.node.example.com,443' "Loon includes the provider-named WebSocket CDN node"
 assert_contains "$loon_file" 'transport=ws,path=/44556677-ws,host=cdn.node.example.com' "Loon WebSocket syntax follows the official format"
 assert_contains "$qx_file" 'vless=node.example.com:443, method=none, password=00000000-0000-4000-8000-000000000005' "Quantumult X Reality uses an independent VLESS credential"
 assert_contains "$qx_file" 'obfs=over-tls, obfs-host=www.nic.ad.jp' "Quantumult X Reality uses the official TLS obfuscation fields"
 assert_contains "$qx_file" 'reality-base64-pubkey=0WLDJHaOLiK1sj1q-yDCao1ARBWyN8zPlvdbI6Qd13A, reality-hex-shortid=0011223344556677' "Quantumult X Reality includes the official Reality key fields"
-assert_contains "$qx_file" 'vless-flow=xtls-rprx-vision, fast-open=false, udp-relay=true, tag=🇯🇵 JP VR' "Quantumult X Reality enables Vision and disables incompatible TCP Fast Open"
+assert_contains "$qx_file" 'vless-flow=xtls-rprx-vision, fast-open=false, udp-relay=true, tag=🇯🇵 JP BVL VR' "Quantumult X Reality includes the provider code"
 assert_contains "$qx_file" 'vless=cdn.node.example.com:443, method=none, password=00000000-0000-4000-8000-000000000004, obfs=wss, obfs-host=cdn.node.example.com, obfs-uri=/44556677-ws' "Quantumult X includes the compatible WebSocket CDN node"
 assert_not_contains "$qx_file" 'Hysteria2' "unsupported Quantumult X Hysteria2 omitted"
 assert_not_contains "$qx_file" 'xhttp' "unsupported Quantumult X XHTTP omitted"
 assert_contains "$index_file" 'href="qx.conf"' "subscription portal links the Quantumult X resource"
+assert_contains "$index_file" '<h1>🇯🇵 JP BVL</h1>' "subscription portal displays the provider code"
 
 cdn_sub_token=$SUB_TOKEN
 ENABLE_CDN=false
@@ -172,9 +238,19 @@ SUB_TOKEN="abcdef0123456789abcdef0123456789abcd"
 # shellcheck disable=SC2218
 write_subscriptions
 direct_qx_file="$SUB_ROOT/$SUB_TOKEN/qx.conf"
-assert_contains "$direct_qx_file" 'tag=🇯🇵 JP VR' "direct-only Quantumult X resource retains Reality"
-assert_not_contains "$direct_qx_file" 'tag=🇯🇵 JP VW' "direct-only Quantumult X resource omits the CDN node"
+assert_contains "$direct_qx_file" 'tag=🇯🇵 JP BVL VR' "direct-only Quantumult X resource retains provider-named Reality"
+assert_not_contains "$direct_qx_file" 'tag=🇯🇵 JP BVL VW' "direct-only Quantumult X resource omits the CDN node"
 ENABLE_CDN=true
+SUB_TOKEN=$cdn_sub_token
+
+NODE_PREFIX="🇯🇵 JP YOO"
+SUB_TOKEN="fedcba9876543210fedcba9876543210fedc"
+# shellcheck disable=SC2218
+write_subscriptions
+renamed_qx_file="$SUB_ROOT/$SUB_TOKEN/qx.conf"
+assert_contains "$renamed_qx_file" 'password=00000000-0000-4000-8000-000000000005' "provider rename preserves Quantumult X credentials"
+assert_contains "$renamed_qx_file" 'tag=🇯🇵 JP YOO VR' "provider rename updates Quantumult X node tags"
+NODE_PREFIX="🇯🇵 JP BVL"
 SUB_TOKEN=$cdn_sub_token
 
 assert_contains "$REPO_ROOT/vps-deploy.sh" 'cloudflare_api_token:' "official Hysteria Cloudflare key"
@@ -195,10 +271,11 @@ assert_contains "$REPO_ROOT/vps-deploy.sh" 'chown --no-dereference hysteria:hyst
 assert_contains "$REPO_ROOT/vps-deploy.sh" 'write_state_file "$PENDING_STATE_FILE"' "credentials are staged before service configuration"
 assert_contains "$REPO_ROOT/vps-deploy.sh" 'mv -f -- "$PENDING_STATE_FILE" "$STATE_FILE"' "pending state is promoted only after verification"
 assert_contains "$REPO_ROOT/vps-deploy.sh" 'STATE_VR_QX_UUID=%q' "Quantumult X Reality credential is persisted"
+assert_contains "$REPO_ROOT/vps-deploy.sh" 'STATE_PROVIDER=%q' "provider code is persisted"
 assert_contains "$REPO_ROOT/vps-deploy.sh" '"email": "quantumult-x"' "Xray authorizes the Quantumult X Reality credential"
 assert_contains "$REPO_ROOT/vps-deploy.sh" 'fail2ban：inactive' "health check reports degraded SSH abuse protection"
-assert_not_contains "$REPO_ROOT/vps-deploy.sh" 'PROVIDER_ENV' "service-provider input removed"
-assert_not_contains "$REPO_ROOT/vps-deploy.sh" 'STATE_PROVIDER' "service-provider state removed"
+assert_contains "$REPO_ROOT/vps-deploy.sh" 'PROVIDER_ENV' "non-interactive provider input is supported"
+assert_contains "$REPO_ROOT/vps-deploy.sh" 'valid_provider_code' "provider input is validated"
 
 BACKUP_ROOT="$test_root/backups"
 printf '%s\n' old > "$test_root/rollback.conf"
@@ -436,7 +513,7 @@ EOF
     pass "Hysteria accepts generated tuning fields"
 fi
 
-# 用无副作用替身走完 main，确认三参数非交互模式不会停在提示或成功检查。
+# 用无副作用替身走完 main，确认两个位置参数的非交互模式不会停在提示或成功检查。
 main_calls=()
 record_main_call() { main_calls+=("$1"); }
 require_platform() { record_main_call platform; }
@@ -445,6 +522,7 @@ load_state() { record_main_call state; }
 configure_inputs() {
     DOMAIN=node.example.com
     EMAIL=admin@example.com
+    PROVIDER=BVL
     ACME_MODE=http
     CDN_DOMAIN=
     ENABLE_CDN=false
@@ -480,7 +558,7 @@ COUNTRY_ENV=JP
 REALITY_TARGET_ENV=www.nic.ad.jp:443
 ACME_MODE_ENV=http
 CDN_DOMAIN_ENV=
-unset STATE_DOMAIN STATE_EMAIL STATE_ACME_MODE STATE_CDN_DOMAIN
+unset STATE_DOMAIN STATE_EMAIL STATE_PROVIDER STATE_ACME_MODE STATE_CDN_DOMAIN
 main node.example.com admin@example.com
 [[ " ${main_calls[*]} " == *' health promote_state clear_phase summary '* ]] || \
     fail "non-interactive main did not reach successful handoff"

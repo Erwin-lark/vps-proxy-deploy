@@ -9,11 +9,13 @@
 
 v4 的目标是可审计、可重跑、失败不伪装成成功。脚本不依赖任何既有 VPS，也不会修改 SSH 登录方式、删除用户、清空既有防火墙规则或自动杀死端口占用进程。
 
-节点名称只包含国旗、国家码和协议缩写，例如 `🇯🇵 JP VR`；v4.1.2 起不再要求、保存或显示服务商代码。
+节点名称包含国旗、国家码、服务商代码和协议缩写，例如 `🇯🇵 JP BVL VR`。脚本自动识别国家/地区；服务商无法从公网 IP 稳定判断，因此首次安装时必须由用户提供 2–8 位大写字母或数字代码，例如 `BVL`、`GCP`、`ALI`、`YOO`。
 
 v4.1.3 为首装失败增加阶段标记和待提交状态，安全重跑会复用已生成凭证；同时会审查并修复无链接的 Hysteria ACME 遗留属主，避免服务用户无法读写证书目录。
 
 v4.2.0 新增 Quantumult X 原生节点资源 `qx.conf`：直连 Reality 使用独立 UUID，启用 CDN 时再加入 VLESS WebSocket。不生成 Quantumult X 当前不支持的 Hysteria2 或 XHTTP 伪节点。
+
+v4.3.0 恢复服务商代码并统一应用到 Clash、Loon、Quantumult X、策略组和订阅门户。交互安装会询问代码；非交互安装必须传入 `PROVIDER_ENV`。代码会保存到状态文件，安全重跑时自动复用，不会改变现有 UUID、密码、秘密路径或订阅 Token。
 
 首次部署、Cloudflare 两枚 Token、Tunnel “尚未检测到连接”、Public Hostname、Clash/Loon/Quantumult X 导入、统一测速、更新、回滚和逐项排错，请直接阅读 **[从零部署超详细手册](MANUAL.md)**。
 
@@ -61,7 +63,9 @@ sudo bash vps-deploy.sh
 基础非交互部署（Reality + Hysteria2）：
 
 ```bash
-sudo bash vps-deploy.sh node.example.com admin@example.com
+PROVIDER_ENV=BVL \
+sudo --preserve-env=PROVIDER_ENV \
+  bash vps-deploy.sh node.example.com admin@example.com
 ```
 
 加入 Cloudflare Tunnel/XHTTP/WebSocket：
@@ -69,7 +73,8 @@ sudo bash vps-deploy.sh node.example.com admin@example.com
 ```bash
 CDN_DOMAIN_ENV=cdn.node.example.com \
 CF_TOKEN_ENV='eyJ...' \
-sudo --preserve-env=CDN_DOMAIN_ENV,CF_TOKEN_ENV \
+PROVIDER_ENV=BVL \
+sudo --preserve-env=CDN_DOMAIN_ENV,CF_TOKEN_ENV,PROVIDER_ENV \
   bash vps-deploy.sh node.example.com admin@example.com
 ```
 
@@ -78,7 +83,8 @@ DNS-01（无需 HTTP-01，但每次重写 Hysteria 配置时都要重新传 Toke
 ```bash
 ACME_MODE_ENV=dns \
 CF_DNS_TOKEN_ENV='Cloudflare-DNS-API-Token' \
-sudo --preserve-env=ACME_MODE_ENV,CF_DNS_TOKEN_ENV \
+PROVIDER_ENV=BVL \
+sudo --preserve-env=ACME_MODE_ENV,CF_DNS_TOKEN_ENV,PROVIDER_ENV \
   bash vps-deploy.sh node.example.com admin@example.com
 ```
 
@@ -89,7 +95,8 @@ ACME_MODE_ENV=dns \
 CF_DNS_TOKEN_ENV='Cloudflare-DNS-API-Token' \
 CDN_DOMAIN_ENV=cdn.node.example.com \
 CF_TOKEN_ENV='eyJ...' \
-sudo --preserve-env=ACME_MODE_ENV,CF_DNS_TOKEN_ENV,CDN_DOMAIN_ENV,CF_TOKEN_ENV \
+PROVIDER_ENV=BVL \
+sudo --preserve-env=ACME_MODE_ENV,CF_DNS_TOKEN_ENV,CDN_DOMAIN_ENV,CF_TOKEN_ENV,PROVIDER_ENV \
   bash vps-deploy.sh node.example.com admin@example.com
 ```
 
@@ -149,7 +156,8 @@ DNS Token 只写入权限为 `root:hysteria 640` 的 Hysteria 配置，不写入
 UFW 采用增量规则，不执行 `ufw reset`。如果要自行管理防火墙：
 
 ```bash
-MANAGE_UFW_ENV=0 sudo --preserve-env=MANAGE_UFW_ENV \
+MANAGE_UFW_ENV=0 PROVIDER_ENV=BVL \
+sudo --preserve-env=MANAGE_UFW_ENV,PROVIDER_ENV \
   bash vps-deploy.sh node.example.com admin@example.com
 ```
 
@@ -175,9 +183,9 @@ Quantumult X: https://<CDN_DOMAIN>/<token>/qx.conf
 
 可用 `scp` 取回。不要通过明文 HTTP 传输这些文件，它们包含节点凭证。
 
-Loon 官方当前列出的传输没有 XHTTP，因此不会生成伪 XHTTP 节点。启用 CDN 后，Loon 配置包含 Reality、Hysteria2 和官方支持的 VLESS WebSocket；Clash/Mihomo 配置包含 Reality、Hysteria2、XHTTP 和 WebSocket。
+Loon 官方当前列出的传输没有 XHTTP，因此不会生成伪 XHTTP 节点。启用 CDN 后，Loon 配置包含 Reality、Hysteria2 和官方支持的 VLESS WebSocket；Clash/Mihomo 配置包含 Reality、Hysteria2、XHTTP 和 WebSocket。以日本 BVL 主机为例，Clash 显示 `🇯🇵 JP BVL VR / H2 / VX / VW`，Loon 显示 `🇯🇵 JP BVL VR / H2 / VW`。
 
-Quantumult X 资源使用官方 VLESS Reality/Vision 与 VLESS WSS 字段。`VR` 始终生成，`VW` 只在启用 CDN 时生成；`H2` 与 `VX` 不会写入 `qx.conf`。请使用支持 VLESS Reality 的新版 Quantumult X；v4.2.0 以 1.7.0 官方示例字段为校验基线。
+Quantumult X 资源使用官方 VLESS Reality/Vision 与 VLESS WSS 字段。`VR` 始终生成，`VW` 只在启用 CDN 时生成；`H2` 与 `VX` 不会写入 `qx.conf`。以日本 BVL 主机为例，节点名称是 `🇯🇵 JP BVL VR / VW`。请使用支持 VLESS Reality 的新版 Quantumult X；v4.2.0 起以 1.7.0 官方示例字段为校验基线。
 
 WebSocket 的优势是客户端兼容性，不是隐蔽性或最低延迟。Xray 上游提示 WebSocket 具有明显的 HTTP/1.1 Upgrade 特征，因此 Mihomo 优先保留 XHTTP，Loon 才使用 WebSocket 作为 CDN 兜底。
 
@@ -198,6 +206,7 @@ Quantumult X 可在主配置 `[general]` 中设置 `server_check_url = https://c
 |---|---|
 | `DOMAIN_ENV` | 直连域名 |
 | `EMAIL_ENV` | ACME 邮箱 |
+| `PROVIDER_ENV` | 2–8 位服务商代码；首次非交互安装必填，例如 `BVL`、`GCP`，输入会转成大写 |
 | `COUNTRY_ENV` | 两位国家码；自动检测失败或需覆盖时使用 |
 | `REALITY_TARGET_ENV` | `host:443`；未知地区必须显式设置 |
 | `ACME_MODE_ENV` | `http` 或 `dns` |
@@ -210,6 +219,7 @@ Quantumult X 可在主配置 `[general]` 中设置 `server_check_url = https://c
 ## 幂等、迁移与备份
 
 - v4 状态：`/etc/vps-proxy/state.env`，`root:root 600`。
+- 服务商代码写入 `STATE_PROVIDER`；后续重跑若未传 `PROVIDER_ENV` 会自动复用，显式传入可更名。
 - 中断恢复：`/etc/vps-proxy/install-phase` 记录阶段，`state.pending` 在健康检查前保留已生成凭证；成功后前者删除、后者提升为 `state.env`。
 - 旧版 `subs.conf` 只按字段读取并验证，不再 `source`，避免历史输入造成命令注入。
 - Reality 私钥、公钥、Short ID、Clash/Loon/Quantumult X 独立 UUID、Hysteria 密码和订阅 Token 会在重跑时复用。
@@ -228,6 +238,8 @@ Quantumult X 可在主配置 `[general]` 中设置 `server_check_url = https://c
 | cloudflared | 2026.7.3 |
 
 下载使用仓库中固定的 SHA-256；版本升级必须同步更新版本、校验值和 CI 验证器。
+
+从 v4.2.x 升级时，旧状态没有服务商代码。请先用安装模式重跑一次并传入 `PROVIDER_ENV`；在完成迁移前直接运行新版 `--check` 会明确停止并提示升级方法。此次迁移只重命名节点并补写状态，不会更换节点凭证或订阅 URL。
 
 ## 验收与维护
 

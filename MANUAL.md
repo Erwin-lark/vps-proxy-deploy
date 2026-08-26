@@ -15,7 +15,7 @@ Loon 不支持 XHTTP，因此 Loon 正常情况下只有 `VR / H2 / VW` 三个�
 
 Quantumult X 订阅只输出官方原生字段能表达的节点：未启用 CDN 时只有 `VR`，启用 CDN 时有 `VR / VW`。`H2 / VX` 不出现是正常的，不会为了“凑数”生成客户端无法使用的伪配置。
 
-节点名称格式是“国旗 + 国家码 + 协议缩写”，例如 `🇯🇵 JP VR`。脚本不需要服务商代码，也不会把服务商标识写入状态或订阅。
+节点名称格式是“国旗 + 国家码 + 服务商代码 + 协议缩写”，例如 `🇯🇵 JP BVL VR`。国家/地区由脚本根据 VPS 公网地址识别，服务商代码则必须由用户提供：公网登记信息不能可靠区分 BVL、YOO 等转售商，因此脚本不会进行容易误判的“自动识别”。
 
 ## 0. 先理解三个名称
 
@@ -53,6 +53,7 @@ SSH 端口：             <SSH_PORT>
 直连域名：             <DIRECT_DOMAIN>
 CDN 域名：             <CDN_DOMAIN>
 Tunnel 名称：          <TUNNEL_NAME>
+服务商代码：           <PROVIDER>
 ACME 邮箱：            <EMAIL>
 国家代码：             <COUNTRY>
 Reality target：       <REALITY_TARGET>:443
@@ -68,6 +69,7 @@ SSH_PORT=23277
 DIRECT_DOMAIN=jp-bvl.alecyinshis.com
 CDN_DOMAIN=cdn-jp-bvl.alecyinshis.com
 TUNNEL_NAME=cdn-jp-bvl
+PROVIDER=BVL
 EMAIL=alecyinshi@gmail.com
 COUNTRY=JP
 REALITY_TARGET=www.nic.ad.jp:443
@@ -81,6 +83,7 @@ ZONE=alecyinshis.com
 - VPS 有可用公网 IPv4，或者你明确理解 IPv6-only 部署。
 - VPS 提供商允许 `443/tcp` 和 `443/udp`。
 - 直连域名与 CDN 域名不能相同。
+- 服务商代码只能使用 2–8 位英文字母或数字；脚本会统一转成大写。例如 `GCP`、`ALI`、`YOO`、`BVL`。
 - 如果要求客户端延迟低于 100ms，必须在购买前从实际客户端网络测试候选机房 IP；脚本无法修复物理距离和运营商绕路。
 
 ## 2. 在 Mac 上建立 SSH 别名
@@ -399,6 +402,7 @@ ssh -T <SSH_ALIAS> '
   sudo --preserve-env=CF_DNS_TOKEN_ENV,CF_TOKEN_ENV \
     env ACME_MODE_ENV=dns \
         CDN_DOMAIN_ENV=<CDN_DOMAIN> \
+        PROVIDER_ENV=<PROVIDER> \
         COUNTRY_ENV=<COUNTRY> \
         REALITY_TARGET_ENV=<REALITY_TARGET>:443 \
         MANAGE_UFW_ENV=1 \
@@ -426,6 +430,7 @@ ssh -T <SSH_ALIAS> '
   sudo --preserve-env=CF_DNS_TOKEN_ENV,CF_TOKEN_ENV \
     env ACME_MODE_ENV=dns \
         CDN_DOMAIN_ENV=cdn-jp-bvl.alecyinshis.com \
+        PROVIDER_ENV=BVL \
         COUNTRY_ENV=JP \
         REALITY_TARGET_ENV=www.nic.ad.jp:443 \
         MANAGE_UFW_ENV=1 \
@@ -438,6 +443,8 @@ ssh -T <SSH_ALIAS> '
 ```
 
 如果 `<SSH_ALIAS>` 登录后已经是 root，删除上述两处 `sudo --preserve-env=...`，直接执行后面的 `env ... bash /root/vps-deploy.sh` 即可。
+
+这里的 `PROVIDER_ENV` 是节点名称中的服务商代码，不是域名或 Tunnel 名称。首次非交互安装缺少它时，脚本会在修改系统前停止。输入 `bvl` 也会规范化为 `BVL`。成功安装后代码写入 `/etc/vps-proxy/state.env` 的 `STATE_PROVIDER`，以后使用相同状态重跑时可不再传入；若显式传入不同代码，则只会重新生成客户端名称和相关配置，不会更换 UUID、密码、秘密路径或订阅 Token。
 
 首次执行会：
 
@@ -633,10 +640,10 @@ sudo bash /root/vps-deploy.sh --check
 6. 进入 Proxies，确认出现：
 
 ```text
-<国家> VR
-<国家> H2
-<国家> VX
-<国家> VW
+<国旗> <国家码> <服务商> VR
+<国旗> <国家码> <服务商> H2
+<国旗> <国家码> <服务商> VX
+<国旗> <国家码> <服务商> VW
 ```
 
 ### 13.2 作为主配置的 proxy-provider
@@ -680,9 +687,9 @@ Expected status: 204
 5. 预期只看到三项：
 
 ```text
-VR
-H2
-VW
+<国旗> <国家码> <服务商> VR
+<国旗> <国家码> <服务商> H2
+<国旗> <国家码> <服务商> VW
 ```
 
 看不到 VX 是正常的，因为 Loon 官方支持 VLESS WebSocket/HTTP/Reality，但没有 XHTTP。
@@ -707,8 +714,8 @@ test-timeout = 3
 
 ### 15.1 导入前提
 
-1. 先把 Quantumult X 更新到支持 VLESS Reality 的新版；v4.2.0 按 Quantumult X 1.7.0 官方示例的字段生成。
-2. 确认服务器脚本已是 v4.2.0 或更高版本，并且已用安装模式成功重跑过一次。只替换脚本文件却不重跑，服务端不会凭空多出 Quantumult X 的独立 Reality UUID。
+1. 先把 Quantumult X 更新到支持 VLESS Reality 的新版；v4.2.0 起按 Quantumult X 1.7.0 官方示例的字段生成。
+2. 确认服务器脚本已是 v4.3.0 或更高版本，并且已用安装模式成功重跑过一次。只替换脚本文件却不重跑，服务端不会生成 Quantumult X 资源，也不会把服务商代码迁入状态。
 3. 在 VPS 上执行 `sudo bash /root/vps-deploy.sh --check`，确认 `Cloudflare HTTPS 订阅：通过`。
 4. 复制安装摘要中以 `/qx.conf` 结尾的 URL，不要使用 `clash.yaml` 或 `loon.conf`。
 
@@ -732,11 +739,11 @@ https://<CDN_DOMAIN>/<SUB_TOKEN>/qx.conf
 启用 CDN 时应看到：
 
 ```text
-🇯🇵 JP VR
-🇯🇵 JP VW
+🇯🇵 JP BVL VR
+🇯🇵 JP BVL VW
 ```
 
-国旗和国家码由 VPS 地区自动识别，上面的 JP 只是示例。未启用 CDN 时只出现 `VR`。Quantumult X 中看不到 `H2 / VX` 是预期结果。
+国旗和国家码由 VPS 地区自动识别，服务商代码来自安装输入；上面的 JP 和 BVL 只是示例。未启用 CDN 时只出现 `VR`。Quantumult X 中看不到 `H2 / VX` 是预期结果。
 
 ### 15.3 直接编辑主配置的备用方法
 
@@ -763,7 +770,7 @@ Quantumult X 的网页响应测试、Clash/Mihomo 和 Loon 的实现不完全相
 ### 15.5 导入失败排查
 
 1. 在 Safari 中打开完整 `qx.conf` URL。应看到以 `vless=` 开头的一至两行文本；不要截图或转发，其中包含 UUID。
-2. 如果是 404，先确认 URL 以 `/qx.conf` 结尾，然后在 VPS 用安装模式重跑 v4.2.0，再执行 `--check`。
+2. 如果是 404，先确认 URL 以 `/qx.conf` 结尾，然后在 VPS 用安装模式重跑当前 v4.3.0；从 v4.2.x 升级时须传入 `PROVIDER_ENV=<PROVIDER>`，成功后再执行 `--check`。
 3. 如果是 Cloudflare 502，重新核对 Published application 的 Service URL 必须为 `http://127.0.0.1:10000`。
 4. 如果 URL 有内容但资源报语法错，确认导入的是“服务器/节点资源”，关闭 `opt-parser`，更新 Quantumult X 后删除旧资源并重新添加。
 5. 如果只有 `VR` 而预期还有 `VW`，确认本次安装确实传入 `CDN_DOMAIN_ENV`，并且 `--check` 中 WebSocket/Cloudflare 自测通过。
@@ -943,6 +950,8 @@ ssh -T <SSH_ALIAS> '
 
 然后像首次部署一样，从钥匙串传 DNS Token；已有 cloudflared 服务时不需要再次传 Tunnel Token。更新会重启 Xray、Hysteria2、Caddy，可能有数秒中断，因此必须先说明影响并获得确认。
 
+从 v4.2.x 更新到 v4.3.0 时，第一次安装模式重跑必须在第 8 节的 `env` 参数中加入 `PROVIDER_ENV=<PROVIDER>`。迁移成功后 `STATE_PROVIDER` 会被安全复用。节点显示名称将改变，因此 Clash、Loon、Quantumult X 需要手动刷新远程资源；订阅 URL 和各协议凭证不变。
+
 更新完成后立即执行：
 
 ```bash
@@ -1007,6 +1016,7 @@ Cloudflare：
 
 VPS：
 
+- [ ] 首次安装已提供 2–8 位服务商代码，`--check` 摘要显示正确的大写代码。
 - [ ] `--check` 四协议真实出站全部通过。
 - [ ] Xray、Hysteria2、Caddy、cloudflared 四个代理服务 active 且 enabled。
 - [ ] fail2ban active 且 enabled；若为 degraded，已根据日志查明原因。
@@ -1020,9 +1030,9 @@ VPS：
 
 客户端：
 
-- [ ] Clash 显示 VR/H2/VX/VW。
-- [ ] Loon 显示 VR/H2/VW。
-- [ ] Quantumult X 在启用 CDN 时显示 VR/VW，未启用 CDN 时只显示 VR。
+- [ ] Clash 显示“国旗 + 国家码 + 服务商 + VR/H2/VX/VW”。
+- [ ] Loon 显示“国旗 + 国家码 + 服务商 + VR/H2/VW”。
+- [ ] Quantumult X 在启用 CDN 时显示带服务商代码的 VR/VW，未启用 CDN 时只显示 VR。
 - [ ] Quantumult X 资源直接使用 `qx.conf`，不启用第三方 `opt-parser`。
 - [ ] 各客户端使用相同测试 URL 和超时。
 - [ ] Wi-Fi 与蜂窝分别测试。

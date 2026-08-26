@@ -5,7 +5,7 @@
 set -Eeuo pipefail
 umask 027
 
-SCRIPT_VERSION="4.2.0"
+SCRIPT_VERSION="4.3.0"
 XRAY_VERSION="v26.3.27"
 HYSTERIA_VERSION="app/v2.12.1"
 CADDY_VERSION="v2.11.4"
@@ -79,23 +79,24 @@ VPS 代理部署脚本 v4
   sudo bash vps-deploy.sh
 
 非交互安装：
-  sudo bash vps-deploy.sh DOMAIN EMAIL
+  PROVIDER_ENV=BVL sudo --preserve-env=PROVIDER_ENV \
+    bash vps-deploy.sh DOMAIN EMAIL
 
 DNS-01（Cloudflare）：
-  ACME_MODE_ENV=dns CF_DNS_TOKEN_ENV='...' \
-    sudo --preserve-env=ACME_MODE_ENV,CF_DNS_TOKEN_ENV \
+  PROVIDER_ENV=BVL ACME_MODE_ENV=dns CF_DNS_TOKEN_ENV='...' \
+    sudo --preserve-env=PROVIDER_ENV,ACME_MODE_ENV,CF_DNS_TOKEN_ENV \
       bash vps-deploy.sh DOMAIN EMAIL
 
 启用 Cloudflare Tunnel + XHTTP + WebSocket + HTTPS 订阅：
-  CDN_DOMAIN_ENV=cdn.example.com CF_TOKEN_ENV='eyJ...' \
-    sudo --preserve-env=CDN_DOMAIN_ENV,CF_TOKEN_ENV \
+  PROVIDER_ENV=BVL CDN_DOMAIN_ENV=cdn.example.com CF_TOKEN_ENV='eyJ...' \
+    sudo --preserve-env=PROVIDER_ENV,CDN_DOMAIN_ENV,CF_TOKEN_ENV \
       bash vps-deploy.sh node.example.com EMAIL
 
 只读验收：
   sudo bash vps-deploy.sh --check
 
-可选环境变量：
-  DOMAIN_ENV, EMAIL_ENV, COUNTRY_ENV, REALITY_TARGET_ENV
+输入环境变量（首次非交互安装的 PROVIDER_ENV 必填）：
+  DOMAIN_ENV, EMAIL_ENV, PROVIDER_ENV, COUNTRY_ENV, REALITY_TARGET_ENV
   ACME_MODE_ENV=http|dns, CF_DNS_TOKEN_ENV
   CDN_DOMAIN_ENV, CF_TOKEN_ENV
   MANAGE_UFW_ENV=0|1, SKIP_DNS_CHECK_ENV=0|1
@@ -231,6 +232,9 @@ migrate_legacy_state() {
     valid_uuid "$value" && STATE_VR_QX_UUID="$value"
     value=$(legacy_value VL_UUIDS_2)
     valid_uuid "$value" && STATE_VR_LOON_UUID="$value"
+    value=$(legacy_value PROVIDER)
+    value=$(printf '%s' "$value" | tr '[:lower:]' '[:upper:]')
+    valid_provider_code "$value" && STATE_PROVIDER="$value"
     value=$(legacy_value HY2_PASS)
     [[ "$value" =~ ^[A-Za-z0-9._~-]{16,128}$ ]] && STATE_HY2_PASS="$value"
     value=$(legacy_value XHTTP_UUID)
@@ -279,6 +283,10 @@ valid_email() {
     [[ "$1" =~ ^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,63}$ ]]
 }
 
+valid_provider_code() {
+    [[ "$1" =~ ^[A-Z0-9]{2,8}$ ]]
+}
+
 valid_uuid() {
     [[ "$1" =~ ^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$ ]]
 }
@@ -309,6 +317,8 @@ prompt_value() {
 configure_inputs() {
     DOMAIN=$(normalize_domain "${DOMAIN_ENV:-${ARG_DOMAIN:-${STATE_DOMAIN:-}}}")
     EMAIL="${EMAIL_ENV:-${ARG_EMAIL:-${STATE_EMAIL:-}}}"
+    PROVIDER="${PROVIDER_ENV:-${STATE_PROVIDER:-}}"
+    PROVIDER=$(printf '%s' "$PROVIDER" | tr '[:lower:]' '[:upper:]')
     ACME_MODE="${ACME_MODE_ENV:-${STATE_ACME_MODE:-http}}"
     CF_DNS_TOKEN="${CF_DNS_TOKEN_ENV:-}"
     CDN_DOMAIN=$(normalize_domain "${CDN_DOMAIN_ENV:-${STATE_CDN_DOMAIN:-}}")
@@ -322,6 +332,10 @@ configure_inputs() {
         done
         while ! valid_email "$EMAIL"; do
             EMAIL=$(prompt_value "Let's Encrypt 联系邮箱" "$EMAIL")
+        done
+        while ! valid_provider_code "$PROVIDER"; do
+            PROVIDER=$(prompt_value '服务商代码（2-8 位字母/数字，例如 GCP、ALI、YOO、BVL）' "$PROVIDER")
+            PROVIDER=$(printf '%s' "$PROVIDER" | tr '[:lower:]' '[:upper:]')
         done
         ACME_MODE=$(prompt_value "ACME 模式 http/dns" "$ACME_MODE")
         if [[ "$ACME_MODE" == "dns" && -z "$CF_DNS_TOKEN" ]]; then
@@ -339,6 +353,8 @@ configure_inputs() {
 
     valid_domain "$DOMAIN" || die "域名格式无效：$DOMAIN"
     valid_email "$EMAIL" || die "必须提供有效邮箱；非交互用第二个参数或 EMAIL_ENV"
+    valid_provider_code "$PROVIDER" || \
+        die "必须提供 2-8 位字母/数字服务商代码；非交互用 PROVIDER_ENV（如 BVL）"
     [[ "$ACME_MODE" == "http" || "$ACME_MODE" == "dns" ]] || die "ACME_MODE_ENV 只能是 http 或 dns"
     [[ "$MANAGE_UFW" == "0" || "$MANAGE_UFW" == "1" ]] || die "MANAGE_UFW_ENV 只能是 0 或 1"
     [[ "$SKIP_DNS_CHECK" == "0" || "$SKIP_DNS_CHECK" == "1" ]] || die "SKIP_DNS_CHECK_ENV 只能是 0 或 1"
@@ -360,7 +376,7 @@ configure_inputs() {
         CF_TOKEN=$(grep -oE 'eyJ[A-Za-z0-9_+/=-]+' <<<"$CF_TOKEN" | head -n 1 || true)
         [[ -n "$CF_TOKEN" ]] || die "Cloudflare Tunnel Token 格式无效"
     fi
-    info "直连域名：${DOMAIN}；ACME：${ACME_MODE}；CDN：${ENABLE_CDN}"
+    info "直连域名：${DOMAIN}；服务商：${PROVIDER}；ACME：${ACME_MODE}；CDN：${ENABLE_CDN}"
 }
 
 detect_region() {
@@ -380,7 +396,7 @@ else:
     print('🏳️')
 PY
 )
-    NODE_PREFIX="${FLAG} ${COUNTRY}"
+    NODE_PREFIX="${FLAG} ${COUNTRY} ${PROVIDER}"
 
     REALITY_TARGET="${REALITY_TARGET_ENV:-${STATE_REALITY_TARGET:-}}"
     if [[ -z "$REALITY_TARGET" ]]; then
@@ -1254,6 +1270,7 @@ write_state_file() {
         printf 'STATE_EMAIL=%q\n' "$EMAIL"
         printf 'STATE_ACME_MODE=%q\n' "$ACME_MODE"
         printf 'STATE_CDN_DOMAIN=%q\n' "$CDN_DOMAIN"
+        printf 'STATE_PROVIDER=%q\n' "$PROVIDER"
         printf 'STATE_COUNTRY=%q\n' "$COUNTRY"
         printf 'STATE_REALITY_TARGET=%q\n' "$REALITY_TARGET"
         printf 'STATE_XRAY_LISTEN=%q\n' "$XRAY_LISTEN"
@@ -1758,6 +1775,7 @@ print_summary() {
     fi
     printf '  Reality：%s:443/tcp\n' "$DOMAIN"
     printf '  Hysteria2：%s:443/udp\n' "$DOMAIN"
+    printf '  服务商代码：%s\n' "$PROVIDER"
     if $ENABLE_CDN; then
         printf '  XHTTP：%s:443（Cloudflare → http://127.0.0.1:%s）\n' "$CDN_DOMAIN" "$CADDY_ORIGIN_PORT"
         printf '  WebSocket：%s:443（Cloudflare → http://127.0.0.1:%s）\n' "$CDN_DOMAIN" "$CADDY_ORIGIN_PORT"
@@ -1783,6 +1801,10 @@ load_check_state() {
     EMAIL=${STATE_EMAIL:?}
     ACME_MODE=${STATE_ACME_MODE:?}
     CDN_DOMAIN=${STATE_CDN_DOMAIN:-}
+    PROVIDER=${STATE_PROVIDER:-}
+    PROVIDER=$(printf '%s' "$PROVIDER" | tr '[:lower:]' '[:upper:]')
+    valid_provider_code "$PROVIDER" || \
+        die "服务商代码状态缺失或无效；请先用 PROVIDER_ENV=BVL 运行一次安装模式升级到 v4.3"
     COUNTRY=${STATE_COUNTRY:-XX}
     REALITY_TARGET=${STATE_REALITY_TARGET:?}
     REALITY_SNI=${REALITY_TARGET%:*}
@@ -1794,7 +1816,7 @@ c=sys.argv[1]
 print(''.join(chr(0x1F1E6 + ord(x)-65) for x in c) if len(c)==2 and c!='XX' else '🏳️')
 PY
 )
-    NODE_PREFIX="${FLAG} ${COUNTRY}"
+    NODE_PREFIX="${FLAG} ${COUNTRY} ${PROVIDER}"
     VR_CLASH_UUID=${STATE_VR_CLASH_UUID:?}
     VR_LOON_UUID=${STATE_VR_LOON_UUID:?}
     VR_QX_UUID=${STATE_VR_QX_UUID:-}
