@@ -15,7 +15,7 @@ v4.1.3 为首装失败增加阶段标记和待提交状态，安全重跑会复�
 
 v4.2.0 新增 Quantumult X 原生节点资源 `qx.conf`：直连 Reality 使用独立 UUID，启用 CDN 时再加入 VLESS WebSocket。不生成 Quantumult X 当前不支持的 Hysteria2 或 XHTTP 伪节点。
 
-v4.3.0 恢复服务商代码并统一应用到 Clash、Loon、Quantumult X、策略组和订阅门户。交互安装会询问代码；非交互安装必须传入 `PROVIDER_ENV`。代码会保存到状态文件，安全重跑时自动复用，不会改变现有 UUID、密码、秘密路径或订阅 Token。
+v4.3.1 恢复服务商代码并统一应用到 Clash、Loon、Quantumult X、策略组和订阅门户。交互安装会询问代码；非交互安装必须传入 `PROVIDER_ENV`。代码会保存到状态文件，安全重跑时自动复用，不会改变现有 UUID、密码、秘密路径或订阅 Token。该版本同时修复 DNS-01 且不管理 UFW 时的错误退出。
 
 首次部署、Cloudflare 两枚 Token、Tunnel “尚未检测到连接”、Public Hostname、Clash/Loon/Quantumult X 导入、统一测速、更新、回滚和逐项排错，请直接阅读 **[从零部署超详细手册](MANUAL.md)**。
 

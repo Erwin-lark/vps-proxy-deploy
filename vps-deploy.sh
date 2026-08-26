@@ -5,7 +5,7 @@
 set -Eeuo pipefail
 umask 027
 
-SCRIPT_VERSION="4.3.0"
+SCRIPT_VERSION="4.3.1"
 XRAY_VERSION="v26.3.27"
 HYSTERIA_VERSION="app/v2.12.1"
 CADDY_VERSION="v2.11.4"
@@ -590,7 +590,10 @@ setup_firewall() {
     if [[ "$MANAGE_UFW" == "0" ]]; then
         warn "MANAGE_UFW_ENV=0：未修改主机防火墙；请自行开放 ${SSH_PORT}/tcp、443/tcp、443/udp"
         [[ "$ACME_MODE" == "http" ]] && warn "HTTP-01 续期还需要永久允许 80/tcp"
-        return
+        # In DNS-01 mode the conditional warning above is false.  With `set -e`,
+        # a bare return would therefore make the whole install fail after this
+        # informational branch despite no firewall operation being requested.
+        return 0
     fi
     info "增量配置 UFW（不 reset、不删除既有规则）"
     ufw allow "${SSH_PORT}/tcp" comment 'vps-proxy SSH' >/dev/null

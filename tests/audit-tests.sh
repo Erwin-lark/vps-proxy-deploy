@@ -89,6 +89,15 @@ if (
     fail "non-interactive install accepted a missing provider code"
 fi
 pass "non-interactive install requires a provider code"
+
+(
+    MANAGE_UFW=0
+    ACME_MODE=dns
+    SSH_PORT=22
+    setup_firewall >/dev/null
+)
+pass "DNS-01 install without firewall management returns success"
+
 [[ $(dns_record_status 6 '2001:db8::1' '2001:0db8:0:0:0:0:0:1') == "match" ]] || \
     fail "equivalent IPv6 DNS address rejected"
 [[ $(dns_record_status 4 '192.0.2.10' $'192.0.2.10\n192.0.2.11') == "mismatch" ]] || \
